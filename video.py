@@ -2,6 +2,7 @@
 from depth_slicer import DepthSlicer
 from detection_utils import non_max_suppression_fast, draw_boxes
 
+import argparse
 import torch 
 import cv2
 import numpy as np
@@ -11,6 +12,18 @@ import threading
 # Globals 
 # Video Writer
 video_writer = None
+
+def parse_args(): 
+    parser = argparse.ArgumentParser(
+        'Change params / method with args'
+    )
+    parser.add_argument('--path', type=str,
+                    help='path to video, or directory of videos [TBI]')
+    parser.add_argument('--prop_thresh', type=float, help='proportion threshold, value between 0.0 and 1.0', default=0.9)
+    parser.add_argument('--depth_thresh', type=float, help='depth threshold, between 0.0 and 1.0. 1.0 is closest.', default=0.2)
+    parser.add_argument('--method', type=str, help='Method of image processing', choices=['precise_grid', 'precise'], default='precise')
+    parser.add_argument('--slice_side_length', type=int, help='length of slice sides', default=800)
+    parser.add_argument('--square_size', type=int, help='side length of squares image is split up into in calibration.', default=50)
 
 def write_frame(frame): 
     global video_writer 
@@ -129,7 +142,6 @@ def precise_video(file_name, prop_thresh=0.9, depth_thresh=.2, square_size=50, s
 
         images = []
         for i, dim in enumerate(dims): 
-            prev = time.time()
             new_slice = frame[dim[2]:dim[3],dim[0]:dim[1]]
             new_slice = cv2.resize(new_slice, (640, 640), interpolation=cv2.INTER_LINEAR)
             images.append(new_slice)
@@ -171,4 +183,8 @@ def precise_video(file_name, prop_thresh=0.9, depth_thresh=.2, square_size=50, s
     video_writer.release()
 
 if __name__ == "__main__":
-    precise_grid_video('/content/test_camera_8_30fps.mp4')
+    args = parse_args()
+    if args.method == 'precise_grid_video': 
+        precise_grid_video(args.path, args.prop_thresh, args.depth_thresh, args.square_size)
+    else: 
+        precise_video(args.path, args.prop_thresh, args.depth_thresh, args.square_size, args.slice_side_length)
