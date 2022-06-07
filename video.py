@@ -92,7 +92,7 @@ def precise_grid_video(file_name, prop_thresh=0.9, depth_thresh=.2, square_size=
     video_writer.release()
         
 
-def precise_video(file_name, prop_thresh=0.9, depth_thresh=.2, square_size=50, lower_bound=1000):
+def precise_video(file_name, prop_thresh=0.9, depth_thresh=.2, square_size=50, slice_side_length=800):
     global video_writer
 
     model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
@@ -108,8 +108,9 @@ def precise_video(file_name, prop_thresh=0.9, depth_thresh=.2, square_size=50, l
     ret, init_frame = video.read()
 
     if ret: 
-        d = DepthSlicer('precise', cv2.cvtColor(init_frame, cv2.COLOR_BGR2RGB), prop_thresh, depth_thresh, slice_side_length=lower_bound, regen=True, square_size=square_size)
+        d = DepthSlicer('precise', cv2.cvtColor(init_frame, cv2.COLOR_BGR2RGB), prop_thresh, depth_thresh, slice_side_length=slice_side_length, regen=True, square_size=square_size)
         dims = d.dims
+        print(dims)
     else: 
         print('Bad Video')
         exit()
@@ -129,8 +130,7 @@ def precise_video(file_name, prop_thresh=0.9, depth_thresh=.2, square_size=50, l
         images = []
         for i, dim in enumerate(dims): 
             prev = time.time()
-            new_slice = dim.make_grid_image(frame)
-            cv2.imwrite(f'slice_test_{i}.jpeg', new_slice)
+            new_slice = frame[dim[2]:dim[3],dim[0]:dim[1]]
             new_slice = cv2.resize(new_slice, (640, 640), interpolation=cv2.INTER_LINEAR)
             images.append(new_slice)
         images.append(frame)
@@ -139,7 +139,7 @@ def precise_video(file_name, prop_thresh=0.9, depth_thresh=.2, square_size=50, l
 
         final_detections = []
         for index, i in enumerate(results.xyxyn):
-            labels, cord_thres = i[:, -1].numpy(), i[:, :-1].numpy()
+            labels, cord_thres = i.cpu()[:, -1].numpy(), i.cpu()[:, :-1].numpy()
             if (index < len(dims)):
                 for l, label in enumerate(labels): 
                     if label == 0: 

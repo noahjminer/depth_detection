@@ -7,7 +7,52 @@ import os
 import time
 
 class SliceGrid: 
+    """
+    A class for storing a grid of dimensions cut from a frame
+
+    Attributes: 
+    width : int
+        How many columns in grid
+    height : int 
+        How many rows in grid
+    tile_w : int 
+        width of each tile in pixels 
+    tile_h : int 
+        height of each tile in pixels 
+    image_width : int 
+        width of grid in pixels
+    image_height : int 
+        height of grid in pixels
+    frame_crop : numpy array (image_width, image_height, 3)
+        stores current frame's grid
+    full : bool 
+        False when size < max 
+    max : int 
+        amount of grid squares, w*h
+    top : int 
+        used to track pixel value of each row 
+    left : int 
+        used to track pixel value of each column 
+    size : int 
+        amount of grid squares already filled
+    original_coord_grid : 2D list of dims [xmin, xmax, ymin, ymax] (in original image coordinates)
+        stores grid square location in original frame
+    slice_coord_grid : 2D list of (left, top) in pixels
+        stores grid square location in grid image
+    """
     def __init__(self, tile_w, tile_h, w=4, h=3):
+        """
+        Parameters: 
+
+        tile_w : int 
+            tile width in pixels
+        tile_h : int 
+            tile height in pixels 
+        w : int 
+            amount of columns 
+        h : int 
+            amount of rows
+        """
         self.width = w 
         self.height = h
         self.tile_w = tile_w
@@ -23,7 +68,17 @@ class SliceGrid:
         self.original_coord_grid = [[None for i in range(0, w)] for j in range(0, h)]
         self.slice_coord_grid = [[None for i in range(0, w)] for j in range(0, h)]
 
-    def insert_tile(self, dim):
+    def insert_tile(self, dim) -> None:
+        """
+        Inserts a tile into next available slot of grid 
+
+        ...
+
+        Parameters: 
+        -----------
+        dim : List of [xmin, xmax, ymin, ymax, blob_index]
+            Values stored in original_coord_grid for later use
+        """
         dim_w = dim[1] - dim[0]
         dim_h = dim[3] - dim[2]
         if not self.full:
@@ -44,7 +99,10 @@ class SliceGrid:
             self.size += 1
             if self.size >= self.max: self.full = True
     
-    def create_empty_image(self):
+    def create_empty_image(self) -> None:
+        """
+        Creates an empty image of image_width * image_height pixels
+        """
         width = 0
         height = 0
         max_width = 0
@@ -62,8 +120,17 @@ class SliceGrid:
         self.image_height = height + 1
         self.frame_crop = np.zeros((self.image_height, self.image_width, 3), np.uint8)
         
-    def make_grid_image(self, frame): 
-        # return image 
+    def make_grid_image(self, frame) -> np.ndarray:
+        """
+        Crops frame with slice_coord_grid and original_coord_grid dimensions
+
+        ...
+
+        Parameters: 
+        -----------
+        frame : np.ndarray
+            current frame in video
+        """ 
         for y, row in enumerate(self.original_coord_grid): 
             for x, dim in enumerate(row): 
                 tile_width = dim[1] - dim[0]
@@ -76,21 +143,34 @@ class SliceGrid:
         return self.frame_crop
     
     def normal_to_pixel_coords(self, coord):
+        """
+        Converts normalized bounding box coordinates to original image coordinates. 
+
+        ...
+
+        Parameters: 
+        -----------
+        coord : np.ndarray
+            [left, top, right, bottom], 0.0 < 1.0
+        """
         left = coord[0] * self.image_width
         top = coord[1] * self.image_height
         right = coord[2] * self.image_width
         bottom = coord[3] * self.image_height
 
+        mid_y = top + (bottom - top) / 2 
+        mid_x = left + (right - left) / 2
+
         for i in range(0, len(self.slice_coord_grid)):
             if i + 1 < len(self.slice_coord_grid):
-                if top < self.slice_coord_grid[i+1][0][1]: 
+                if mid_y < self.slice_coord_grid[i+1][0][1]: 
                     y = i 
                     break
             else: y = i
         
         for i in range(0, len(self.slice_coord_grid[y])):
             if i + 1 < len(self.slice_coord_grid[y]):
-                if left < self.slice_coord_grid[y][i+1][0]: 
+                if mid_x < self.slice_coord_grid[y][i+1][0]: 
                     x = i
                     break
             else: x = i
@@ -226,7 +306,7 @@ class DepthSlicer:
 
     def calculate_simple_dims(self) -> list:
         """
-        Calculates "simple" method dimensions. Loops through every dimension to check for valid slices
+        Calculates "simple" method dimensions. Loops through every dimension to check for valid slices. Slice side length has biggest effect on outcome
 
         ...
 
@@ -304,215 +384,40 @@ class DepthSlicer:
 
     def calculate_precise_dims(self):
         """
-        Calculates more precise dimensions using a grid
+        Calculates more precise dimensions by creating a graph of elligible portions of the image
 
         ...
 
         Parameters:
         None
         """
-        image = cv2.imread(self.path)
-        image_shape = image.shape
-        lower_bound = self.slice_side_length
-
-        # Now, calculate precise dimensions
-        square_size = self.square_size
-        graph = []
-        for y in range(lower_bound, image_shape[0], square_size):
-            ymax = image_shape[0] - 1 if y + square_size > image_shape[0] else y + square_size
-            for x in range(0, image_shape[1], square_size): 
-                xmax = image_shape[1] - 1 if x + square_size > image_shape[1] else x + square_size 
-                # depth mask
-                if self.create_depth_mask(image, [x, xmax, y, ymax]): 
-                    graph.append((int(math.floor(y/square_size)), int(math.floor(x/square_size))))
+        graph, image_shape = self.generate_depth_graph(0, self.square_size)
         
         # Connect islands into one list
-        blobs = []
-        for node in graph: 
-            graph.remove(node)
-            blob = [node]
-            neighbors = self.get_neighbors(node, graph)
-            while len(neighbors) > 0: 
-                neighbor = neighbors.pop()
-                blob.append(neighbor)
-                try:
-                    if graph.count(neighbor) > 0:
-                        graph.remove(neighbor)
-                except ValueError as e: 
-                    print(e)
-                    print(neighbor)
-                    break
-                neighbors = neighbors + self.get_neighbors(neighbor, graph)
-            blobs.append(blob) 
+        blobs = self.connect_squares_into_islands(graph)
         
         # Process connected blobs into one box
-        dims = []
-        for blob in blobs: 
-            xmin = 100
-            ymin = 100
-            xmax = 0
-            ymax = 0
-            for coord in blob: 
-                # FOR VISUALIZING GRID 
-                xl = coord[1] * square_size
-                xr = image_shape[1] - 1 if coord[1] * square_size + square_size > image_shape[1] else coord[1] * square_size + square_size 
-                yt = coord[0] * square_size
-                yb = image_shape[0] - 1 if coord[0] * square_size + square_size > image_shape[0] else coord[0] * square_size + square_size 
-                self.precise_dims.append((xl, xr, yt, yb))
-                # END 
-                if coord[0] < ymin: ymin = coord[0]
-                if coord[1] < xmin: xmin = coord[1]
-                if coord[0] > ymax: ymax = coord[0]
-                if coord[1] > xmax: xmax = coord[1]
-            xmin *= square_size
-            ymin *= square_size
-            ymax = image_shape[0] - 1 if ymax * square_size + square_size > image_shape[0] else ymax * square_size + square_size
-            xmax = image_shape[1] - 1 if xmax * square_size + square_size > image_shape[1] else xmax * square_size + square_size 
-            dims.append((xmin, xmax, ymin, ymax)) 
+        dims = self.create_bounding_box_for_islands(blobs, image_shape, self.square_size)
         
         # Process dims by splitting up bigger boxes 
-        processed_dims = []
-        lower_bound = 1000 
-        for index, dim in enumerate(dims): 
-            w = dim[1] - dim[0]
-            h = dim[3] - dim[2]
-
-            # if only one is less then we can stack
-            if w < lower_bound and h < lower_bound:
-                processed_dims.append(dim)
-                continue
-    
-            # want each stack to be ~800-1200 px 
-            horiz_segments = int(math.floor(w / lower_bound))
-            vert_segments = int(math.floor(h / lower_bound)) 
-            if not horiz_segments: horiz_segments += 1
-            if not vert_segments: vert_segments += 1
-            horiz_remainder = w % lower_bound
-            vert_remainder = h % lower_bound
-
-            segment_width = lower_bound + horiz_remainder / horiz_segments if horiz_segments > 1 else w
-            segment_height = lower_bound + vert_remainder / vert_segments if vert_segments > 1 else h
-
-            woverlap = 0.05 * segment_width
-            hoverlap = 0.05 * segment_height
-            
-            for i in range(1, horiz_segments+1): 
-                for j in range(1, vert_segments+1): 
-                    new_dim = [0,0,0,0]
-                    new_dim[0] = dim[0] + (i-1) * segment_width
-                    new_dim[1] = dim[0] + (i-1) * segment_width + segment_width
-                    new_dim[2] = dim[2] + (j-1) * segment_height
-                    new_dim[3] = dim[2] + (j-1) * segment_height + segment_height
-                    new_dim[0] = new_dim[0] - woverlap if new_dim[0] - woverlap > 0 else 0
-                    new_dim[1] = new_dim[1] + woverlap if new_dim[1] + woverlap < image_shape[1] - 1 else image_shape[1] - 1
-                    new_dim[2] = new_dim[2] - hoverlap if new_dim[2] - hoverlap > 0 else 0
-                    new_dim[3] = new_dim[3] + hoverlap if new_dim[3] + hoverlap < image_shape[0] - 1 else image_shape[0] - 1
-                    new_dim = [int(math.floor(num)) for num in new_dim]
-                    new_dim.append(index)
-                    processed_dims.append(new_dim) 
-        return processed_dims
+        return self.divide_island_boxes(dims, image_shape, self.slice_side_length)
 
 
     def calculate_precise_grid_dims(self): 
-        image = cv2.imread(self.path)
-        image_shape = image.shape
-        lower_bound = 0
-
-        # Now, calculate precise dimensions
-        square_size = self.square_size
-        graph = []
-        for y in range(lower_bound, image_shape[0], square_size):
-            ymax = image_shape[0] - 1 if y + square_size > image_shape[0] else y + square_size
-            for x in range(0, image_shape[1], square_size): 
-                xmax = image_shape[1] - 1 if x + square_size > image_shape[1] else x + square_size 
-                # depth mask
-                if self.create_depth_mask(image, [x, xmax, y, ymax]): 
-                    graph.append((int(math.floor(y/square_size)), int(math.floor(x/square_size))))
+        """
+        Calculates precise grid dimensions. Grid meaning a collage of slices taken from the image and put into one for processing.
+        """
+        # calculate precise dimensions
+        graph, image_shape = self.generate_depth_graph(0, self.square_size)
         
         # Connect islands into one list
-        blobs = []
-        for node in graph: 
-            graph.remove(node)
-            blob = [node]
-            neighbors = self.get_neighbors(node, graph)
-            while len(neighbors) > 0: 
-                neighbor = neighbors.pop()
-                blob.append(neighbor)
-                try:
-                    if graph.count(neighbor) > 0:
-                        graph.remove(neighbor)
-                except ValueError as e: 
-                    print(e)
-                    print(neighbor)
-                    break
-                neighbors = neighbors + self.get_neighbors(neighbor, graph)
-            blobs.append(blob) 
+        blobs = self.connect_squares_into_islands(graph)
         
         # Process connected blobs into one box
-        dims = []
-        for blob in blobs: 
-            xmin = 100
-            ymin = 100
-            xmax = 0
-            ymax = 0
-            for coord in blob: 
-                # FOR VISUALIZING GRID 
-                xl = coord[1] * square_size
-                xr = image_shape[1] - 1 if coord[1] * square_size + square_size > image_shape[1] else coord[1] * square_size + square_size 
-                yt = coord[0] * square_size
-                yb = image_shape[0] - 1 if coord[0] * square_size + square_size > image_shape[0] else coord[0] * square_size + square_size 
-                self.precise_dims.append((xl, xr, yt, yb))
-                # END 
-                if coord[0] < ymin: ymin = coord[0]
-                if coord[1] < xmin: xmin = coord[1]
-                if coord[0] > ymax: ymax = coord[0]
-                if coord[1] > xmax: xmax = coord[1]
-            xmin *= square_size
-            ymin *= square_size
-            ymax = image_shape[0] - 1 if ymax * square_size + square_size > image_shape[0] else ymax * square_size + square_size
-            xmax = image_shape[1] - 1 if xmax * square_size + square_size > image_shape[1] else xmax * square_size + square_size 
-            dims.append((xmin, xmax, ymin, ymax)) 
+        dims = self.create_bounding_box_for_islands(blobs, image_shape, self.square_size)
         
         # Process dims by splitting up bigger boxes 
-        processed_dims = []
-        lower_bound = 250 
-        for index, dim in enumerate(dims): 
-            w = dim[1] - dim[0]
-            h = dim[3] - dim[2]
-
-            # if only one is less then we can stack
-            if w < lower_bound and h < lower_bound:
-                processed_dims.append(dim)
-                continue
-    
-            # want each stack to be ~800-1200 px 
-            horiz_segments = int(math.floor(w / lower_bound))
-            vert_segments = int(math.floor(h / lower_bound)) 
-            if not horiz_segments: horiz_segments += 1
-            if not vert_segments: vert_segments += 1
-            horiz_remainder = w % lower_bound
-            vert_remainder = h % lower_bound
-
-            segment_width = lower_bound + horiz_remainder / horiz_segments if horiz_segments > 1 else w
-            segment_height = lower_bound + vert_remainder / vert_segments if vert_segments > 1 else h
-
-            woverlap = 0.05 * segment_width
-            hoverlap = 0.05 * segment_height
-            
-            for i in range(1, horiz_segments+1): 
-                for j in range(1, vert_segments+1): 
-                    new_dim = [0,0,0,0]
-                    new_dim[0] = dim[0] + (i-1) * segment_width
-                    new_dim[1] = dim[0] + (i-1) * segment_width + segment_width
-                    new_dim[2] = dim[2] + (j-1) * segment_height
-                    new_dim[3] = dim[2] + (j-1) * segment_height + segment_height
-                    new_dim[0] = new_dim[0] - woverlap if new_dim[0] - woverlap > 0 else 0
-                    new_dim[1] = new_dim[1] + woverlap if new_dim[1] + woverlap < image_shape[1] - 1 else image_shape[1] - 1
-                    new_dim[2] = new_dim[2] - hoverlap if new_dim[2] - hoverlap > 0 else 0
-                    new_dim[3] = new_dim[3] + hoverlap if new_dim[3] + hoverlap < image_shape[0] - 1 else image_shape[0] - 1
-                    new_dim = [int(math.floor(num)) for num in new_dim]
-                    new_dim.append(index)
-                    processed_dims.append(new_dim) 
+        processed_dims = self.divide_island_boxes(dims, image_shape, 250)
         
         tile_width = 300 
         tile_height = 400
@@ -529,10 +434,148 @@ class DepthSlicer:
         
         return slices
 
+
+    def divide_island_boxes(self, dims, image_shape, lower_bound): 
+        processed_dims = [] 
+        for index, dim in enumerate(dims): 
+            w = dim[1] - dim[0]
+            h = dim[3] - dim[2]
+
+            # if only one is less then we can stack
+            if w < lower_bound and h < lower_bound:
+                processed_dims.append(dim)
+                continue
+    
+            # want each stack to be ~800-1200 px 
+            horiz_segments = int(math.floor(w / lower_bound))
+            vert_segments = int(math.floor(h / lower_bound)) 
+            if not horiz_segments: horiz_segments += 1
+            if not vert_segments: vert_segments += 1
+            horiz_remainder = w % lower_bound
+            vert_remainder = h % lower_bound
+
+            segment_width = lower_bound + horiz_remainder / horiz_segments if horiz_segments > 1 else w
+            segment_height = lower_bound + vert_remainder / vert_segments if vert_segments > 1 else h
+
+            woverlap = 0.05 * segment_width
+            hoverlap = 0.05 * segment_height
             
-            
+            for i in range(1, horiz_segments+1): 
+                for j in range(1, vert_segments+1): 
+                    new_dim = [0,0,0,0]
+                    new_dim[0] = dim[0] + (i-1) * segment_width
+                    new_dim[1] = dim[0] + (i-1) * segment_width + segment_width
+                    new_dim[2] = dim[2] + (j-1) * segment_height
+                    new_dim[3] = dim[2] + (j-1) * segment_height + segment_height
+                    new_dim[0] = new_dim[0] - woverlap if new_dim[0] - woverlap > 0 else 0
+                    new_dim[1] = new_dim[1] + woverlap if new_dim[1] + woverlap < image_shape[1] - 1 else image_shape[1] - 1
+                    new_dim[2] = new_dim[2] - hoverlap if new_dim[2] - hoverlap > 0 else 0
+                    new_dim[3] = new_dim[3] + hoverlap if new_dim[3] + hoverlap < image_shape[0] - 1 else image_shape[0] - 1
+                    new_dim = [int(math.floor(num)) for num in new_dim]
+                    new_dim.append(index)
+                    processed_dims.append(new_dim)
+
+        return processed_dims
+
+    def generate_depth_graph(self, lower_bound, square_size): 
+        """
+        Generates a list of grid coordinates for areas of the image that pass the distance threshold. 
+        Area size is square_size * square_size.
+
+        Returns list of coordinates : [y,x] and image_shape (height, width) 
+
+        ... 
+
+        Parameters: 
+        ----------
+        lower_bound : int 
+            Used to offset y start in case portion of the image does not need to be considered. Although, usually 0.
+        """
+        image = cv2.imread(self.path)
+        image_shape = image.shape
+
+        graph = []
+        for y in range(lower_bound, image_shape[0], square_size):
+            ymax = image_shape[0] - 1 if y + square_size > image_shape[0] else y + square_size
+            for x in range(0, image_shape[1], square_size): 
+                xmax = image_shape[1] - 1 if x + square_size > image_shape[1] else x + square_size 
+                # depth mask
+                if self.create_depth_mask(image, [x, xmax, y, ymax]): 
+                    graph.append((int(math.floor(y/square_size)), int(math.floor(x/square_size))))
+        return graph, image_shape
 
 
+    def connect_squares_into_islands(self, graph) -> list: 
+        """
+        Connects neighboring squares of graph into a blob. returns a list of blobs
+
+        Parameters: 
+        -----------
+        graph : list of coordinates [y, x]
+            Graph previously generated in generate_depth_graph
+        """
+        blobs = []
+        for node in graph: 
+            graph.remove(node)
+            blob = [node]
+            neighbors = self.get_neighbors(node, graph)
+            while len(neighbors) > 0: 
+                neighbor = neighbors.pop()
+                blob.append(neighbor)
+                try:
+                    if graph.count(neighbor) > 0:
+                        graph.remove(neighbor)
+                except ValueError as e: 
+                    print(e)
+                    print(neighbor)
+                    break
+                neighbors = neighbors + self.get_neighbors(neighbor, graph)
+            blobs.append(blob) 
+        return blobs
+
+    
+    def create_bounding_box_for_islands(self, blobs, image_shape, square_size) -> list:
+        """
+        Creates a bounding box that encompasses each blob in blobs by finding the max and min of each blob's x and y
+
+        ... 
+
+        Parameters: 
+        -----------
+        blobs : list of lists of graph coordinates [y, x]
+            Each blob in blobs is an island to be connected
+        image_shape : tuple (height, width)
+            The shape of the video / image. Used for bounds checking
+        square_size : int 
+            Length of square side. Multiplied by grid coordinate values to get pixel coordinates
+        """
+
+        dims = []
+        for blob in blobs: 
+            xmin = 100
+            ymin = 100
+            xmax = 0
+            ymax = 0
+            for coord in blob: 
+                # FOR VISUALIZING GRID 
+                xl = coord[1] * square_size
+                xr = image_shape[1] - 1 if coord[1] * square_size + square_size > image_shape[1] else coord[1] * square_size + square_size 
+                yt = coord[0] * square_size
+                yb = image_shape[0] - 1 if coord[0] * square_size + square_size > image_shape[0] else coord[0] * square_size + square_size 
+                self.precise_dims.append((xl, xr, yt, yb))
+                # END 
+                if coord[0] < ymin: ymin = coord[0]
+                if coord[1] < xmin: xmin = coord[1]
+                if coord[0] > ymax: ymax = coord[0]
+                if coord[1] > xmax: xmax = coord[1]
+            xmin *= square_size
+            ymin *= square_size
+            ymax = image_shape[0] - 1 if ymax * square_size + square_size > image_shape[0] else ymax * square_size + square_size
+            xmax = image_shape[1] - 1 if xmax * square_size + square_size > image_shape[1] else xmax * square_size + square_size 
+            dims.append((xmin, xmax, ymin, ymax)) 
+        return dims
+
+            
     def find_min_max_of_blob(self, blob, square_size, image_shape, dim=None) -> list: 
         """
         Finds the min and max for x and y in a blob of grid tiles
