@@ -25,8 +25,7 @@ def precise_grid_video(file_name, prop_thresh=0.9, depth_thresh=.2, square_size=
 
     video = cv2.VideoCapture(file_name)
     FPS = int(video.get(cv2.CAP_PROP_FPS))  
-    shape = (int(video.get(cv2.CAP_PROP_FRAME_HEIGHT)), int(video.get(cv2.CAP_PROP_FRAME_WIDTH)))
-    print(shape)
+    shape = (int(video.get(cv2.CAP_PROP_FRAME_WIDTH)), int(video.get(cv2.CAP_PROP_FRAME_HEIGHT)))
 
     outfile = file_name.split('.')[0] + '_result_precise_grid.avi'
     video_writer = cv2.VideoWriter(outfile, cv2.VideoWriter_fourcc(*'XVID'), FPS, shape)  
@@ -63,7 +62,8 @@ def precise_grid_video(file_name, prop_thresh=0.9, depth_thresh=.2, square_size=
 
         final_detections = []
         for index, i in enumerate(results.xyxyn):
-            labels, cord_thres = i[:, -1].numpy(), i[:, :-1].numpy()
+            # comment out .cpu() if you're on cpu
+            labels, cord_thres = np.array(i.cpu())[:, -1], np.array(i.cpu())[:, :-1]
             if (index < len(dims)):
                 for l, label in enumerate(labels): 
                     if label == 0: 
@@ -74,10 +74,10 @@ def precise_grid_video(file_name, prop_thresh=0.9, depth_thresh=.2, square_size=
             else: 
                 for l, label in enumerate(labels): 
                     if label == 0: 
-                        left = cord_thres[l][0] * shape[1]
-                        top =  cord_thres[l][1] * shape[0]
-                        right = cord_thres[l][2] * shape[1]
-                        bottom = cord_thres[l][3] * shape[0]
+                        left = cord_thres[l][0] * shape[0]
+                        top =  cord_thres[l][1] * shape[1]
+                        right = cord_thres[l][2] * shape[0]
+                        bottom = cord_thres[l][3] * shape[1]
                         width = right - left 
                         height = bottom - top 
                         final_detections.append((int(label), cord_thres[l][4], (left,top,width,height)))
@@ -86,7 +86,6 @@ def precise_grid_video(file_name, prop_thresh=0.9, depth_thresh=.2, square_size=
         print(f'FPS: {1 / (time.time() - start_time)}')
         print(f'Frame Number: {frame_count}')
         image = draw_boxes(final_detections, frame, draw_dims=True, dims=d.precise_dims, dims_color=(255,0,255))
-        print(image.shape)
         video_write_buffer = threading.Thread(target=write_frame, args=(image,))
         video_write_buffer.start()
 
@@ -101,7 +100,7 @@ def precise_video(file_name, prop_thresh=0.9, depth_thresh=.2, square_size=50, l
 
     video = cv2.VideoCapture(file_name)
     FPS = int(video.get(cv2.CAP_PROP_FPS))  
-    shape = (int(video.get(cv2.CAP_PROP_FRAME_HEIGHT)), int(video.get(cv2.CAP_PROP_FRAME_WIDTH)))
+    shape = (int(video.get(cv2.CAP_PROP_FRAME_WIDTH)), int(video.get(cv2.CAP_PROP_FRAME_HEIGHT)))
 
     outfile = file_name.split('.')[0] + '_result_precise.avi'
     video_writer = cv2.VideoWriter(outfile, cv2.VideoWriter_fourcc(*'XVID'), FPS, shape)  
@@ -154,10 +153,10 @@ def precise_video(file_name, prop_thresh=0.9, depth_thresh=.2, square_size=50, l
             else: 
                 for l, label in enumerate(labels): 
                     if label == 0: 
-                        left = cord_thres[l][0] * shape[1]
-                        top =  cord_thres[l][1] * shape[0]
-                        right = cord_thres[l][2] * shape[1]
-                        bottom = cord_thres[l][3] * shape[0]
+                        left = cord_thres[l][0] * shape[0]
+                        top =  cord_thres[l][1] * shape[1]
+                        right = cord_thres[l][2] * shape[0]
+                        bottom = cord_thres[l][3] * shape[1]
                         width = right - left 
                         height = bottom - top 
                         final_detections.append((int(label), cord_thres[l][4], (left,top,width,height)))
@@ -172,4 +171,4 @@ def precise_video(file_name, prop_thresh=0.9, depth_thresh=.2, square_size=50, l
     video_writer.release()
 
 if __name__ == "__main__":
-    precise_grid_video("D:\\Downloads\\test_camera_8_30fps.mp4")
+    precise_grid_video('/content/test_camera_8_30fps.mp4')

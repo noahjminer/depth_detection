@@ -89,7 +89,7 @@ class SliceGrid:
             else: y = i
         
         for i in range(0, len(self.slice_coord_grid[y])):
-            if i + 1 < len(self.slice_coord_grid):
+            if i + 1 < len(self.slice_coord_grid[y]):
                 if left < self.slice_coord_grid[y][i+1][0]: 
                     x = i
                     break
