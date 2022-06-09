@@ -6,6 +6,7 @@ import argparse
 import torch 
 import cv2
 import numpy as np
+import signal
 import time
 import threading
 
@@ -24,6 +25,7 @@ def parse_args():
     parser.add_argument('--method', type=str, help='Method of image processing', choices=['precise_grid', 'precise'], default='precise')
     parser.add_argument('--slice_side_length', type=int, help='length of slice sides', default=800)
     parser.add_argument('--square_size', type=int, help='side length of squares image is split up into in calibration.', default=50)
+    return parser.parse_args()
 
 def write_frame(frame): 
     global video_writer 
@@ -34,7 +36,7 @@ def precise_grid_video(file_name, prop_thresh=0.9, depth_thresh=.2, square_size=
     global video_writer
 
     model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
-    model.to('cuda' if torch.cuda.is_available() else 'cpu')
+    model.to('cpu')
 
     video = cv2.VideoCapture(file_name)
     FPS = int(video.get(cv2.CAP_PROP_FPS))  
@@ -67,6 +69,7 @@ def precise_grid_video(file_name, prop_thresh=0.9, depth_thresh=.2, square_size=
         images = []
         for i, dim in enumerate(dims): 
             new_slice = dim.make_grid_image(frame)
+            cv2.imwrite(f'slice_{i}.jpeg', new_slice)
             new_slice = cv2.resize(new_slice, (640, 640), interpolation=cv2.INTER_LINEAR)
             images.append(new_slice)
         images.append(frame)
@@ -176,15 +179,21 @@ def precise_video(file_name, prop_thresh=0.9, depth_thresh=.2, square_size=50, s
 
         print(f'FPS: {1 / (time.time() - start_time)}')
         print(f'Frame Number: {frame_count}')
-        image = draw_boxes(final_detections, frame, draw_dims=True, dims=d.precise_dims, dims_color=(255,0,255))
+        image = draw_boxes(final_detections, frame, draw_dims=True, dims=d.dims, dims_color=(255,0,255))
         video_write_buffer = threading.Thread(target=write_frame, args=(image,))
         video_write_buffer.start()
 
     video_writer.release()
 
+def exit_handler(sigint, frame): 
+    global video_writer 
+    video_writer.release()
+    exit(0)
+
 if __name__ == "__main__":
     args = parse_args()
-    if args.method == 'precise_grid_video': 
+    signal.signal(signal.SIGINT, exit_handler)
+    if args.method == 'precise_grid': 
         precise_grid_video(args.path, args.prop_thresh, args.depth_thresh, args.square_size)
     else: 
         precise_video(args.path, args.prop_thresh, args.depth_thresh, args.square_size, args.slice_side_length)

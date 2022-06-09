@@ -326,7 +326,6 @@ class DepthSlicer:
         slice_dim_x = math.ceil(width / num_slice_x)
         slice_dim_y = math.ceil(height / num_slice_y)
 
-        avgs = []
         no_comp_dims = []
         expand_amount = 0.05 * self.slice_side_length
         half_expand_amount = math.floor(expand_amount * .5)
@@ -427,7 +426,7 @@ class DepthSlicer:
         for dim in processed_dims: 
             if slice.full: 
                 slice.create_empty_image()
-                slice = SliceGrid(tile_width,tile_height)
+                slice = SliceGrid(tile_width, tile_height)
                 slices.append(slice)
             slice.insert_tile(dim)
         slice.create_empty_image()
@@ -435,13 +434,29 @@ class DepthSlicer:
         return slices
 
 
-    def divide_island_boxes(self, dims, image_shape, lower_bound): 
+    def divide_island_boxes(self, dims, image_shape, lower_bound=800) -> list: 
+        """
+        Divides larger bounding boxes into smaller divisions, depending on lower_bound. 
+
+        ... 
+
+        Parameters: 
+        -----------
+        dims : list of int dimensions [xmin, xmax, ymin, ymax, blob_index]
+            dimensions of larger bounding boxes
+        blobs : list of lists with grid squares
+            Used for some cleanup in dim division
+        image_shape : (height, width)
+            Shape of image, used for bounds checking 
+        lower_bound : int 
+            value with which bounding boxes will be divided
+        """
         processed_dims = [] 
         for index, dim in enumerate(dims): 
             w = dim[1] - dim[0]
             h = dim[3] - dim[2]
 
-            # if only one is less then we can stack
+            # if only one is less then just add it in 
             if w < lower_bound and h < lower_bound:
                 processed_dims.append(dim)
                 continue
@@ -474,7 +489,6 @@ class DepthSlicer:
                     new_dim = [int(math.floor(num)) for num in new_dim]
                     new_dim.append(index)
                     processed_dims.append(new_dim)
-
         return processed_dims
 
     def generate_depth_graph(self, lower_bound, square_size): 
