@@ -35,6 +35,8 @@ class SliceGrid:
         stores grid square location in original frame
     slice_coord_grid : 2D list of (left, top) in pixels
         stores grid square location in grid image
+    detections : 2D list of booleans 
+        tracks which slices have detections 
     """
     def __init__(self, tile_w, tile_h, w=4, h=3):
         """

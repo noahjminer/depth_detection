@@ -17,14 +17,33 @@ class SliceGridManager:
         the minimum detections / frames ratio for a slice to be made inactive
     """
 
-    def __init__(self, grids, detection_threshold=0.05, refresh_interval=10):
+    def __init__(self, grids, refresh_interval=10):
+        """
+        Parameters:
+        ---------
+        grids : List of SliceGrids
+            Created in DepthSlicer, these are the various grids created from sliced dimensions
+        refresh_interval : int 
+            number of frames between each refresh
+        """
         self.grids = grids
         self.active_grid_indices = []
         self.front_grid_index = 0
-        self.detection_threshold = detection_threshold
         self.refresh_interval = refresh_interval
     
     def get_slices(self, frame, all=False): 
+        """
+        Returns image crops for each SliceGrid to be plugged into model 
+
+        ... 
+
+        Parameters: 
+        ----------
+        frame : numpy array, cv2 image 
+            Current frame in buffer
+        all : bool 
+            if True, returns all slices. If false, just returns slices with detections
+        """
         slices = []
         prev = time.time()
         if all: 
@@ -39,7 +58,9 @@ class SliceGridManager:
         return slices
     
     def check_detection(self):
-        prev = time.time()
+        """
+        Checks detections in each slice grid, sorts them, and puts as many elligible tiles in as few grids as possible
+        """
         if not len(self.grids): return 
         all_tiles = []
         for grid in self.grids: all_tiles += grid.tiles
@@ -51,6 +72,5 @@ class SliceGridManager:
             if any([tile['detections'] for tile in sorted_tiles[lower_bound:lower_bound+len(grid.tiles)]]):
                 self.active_grid_indices.append(i)
             lower_bound += len(grid.tiles)
-        print(f'check_detections took {time.time()-prev}')
                 
 

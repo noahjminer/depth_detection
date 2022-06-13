@@ -26,6 +26,9 @@ def parse_args():
     parser.add_argument('--method', type=str, help='Method of image processing', choices=['precise_grid', 'precise'], default='precise')
     parser.add_argument('--slice_side_length', type=int, help='length of slice sides', default=800)
     parser.add_argument('--square_size', type=int, help='side length of squares image is split up into in calibration.', default=50)
+    parser.add_argument('--grid_width', type=int, help='how many columns in precise grid slices', default=3)
+    parser.add_argument('--grid_height', type=int, help='number of rows in precise grid slices', default=4)
+    parser.add_argument('--refresh_rate', type=int, help='number of frames between precise grid refreshes', default=50)
     return parser.parse_args()
 
 def write_frame(frame): 
@@ -33,7 +36,7 @@ def write_frame(frame):
     video_writer.write(frame)
     return
 
-def precise_grid_video(file_name, prop_thresh=0.9, depth_thresh=.2, square_size=50):
+def precise_grid_video(args, file_name, prop_thresh=0.9, depth_thresh=.2, square_size=50):
     global video_writer
 
     model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
@@ -49,7 +52,8 @@ def precise_grid_video(file_name, prop_thresh=0.9, depth_thresh=.2, square_size=
     ret, init_frame = video.read()
 
     if ret: 
-        d = DepthSlicer('precise_grid', cv2.cvtColor(init_frame, cv2.COLOR_BGR2RGB), prop_thresh, depth_thresh, 1000, True, square_size=square_size)
+        d = DepthSlicer('precise_grid', cv2.cvtColor(init_frame, cv2.COLOR_BGR2RGB), prop_thresh, depth_thresh, 1000, True, 
+                        square_size=square_size, grid_w=args.grid_width, grid_h=args.grid_height, refresh_rate=args.refresh_rate)
         slice_grid_manager = d.dims
     else: 
         print('Bad Video')
@@ -213,6 +217,6 @@ if __name__ == "__main__":
     args = parse_args()
     signal.signal(signal.SIGINT, exit_handler)
     if args.method == 'precise_grid': 
-        precise_grid_video(args.path, args.prop_thresh, args.depth_thresh, args.square_size)
+        precise_grid_video(args, args.path, args.prop_thresh, args.depth_thresh, args.square_size)
     else: 
         precise_video(args.path, args.prop_thresh, args.depth_thresh, args.square_size, args.slice_side_length)

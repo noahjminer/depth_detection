@@ -28,7 +28,8 @@ class DepthSlicer:
             between 0.0 and 1.0, specifies lower bound on distance. 0.0 is farther, and 1.0 is 
             closer  
         """
-    def __init__(self, method, init_frame, proportion_thresh, dist_thresh, slice_side_length=608, regen=True, square_size=100): 
+    def __init__(self, method, init_frame, proportion_thresh, dist_thresh, slice_side_length=608, regen=True, square_size=100,
+                tile_w=3, tile_h=4, refresh_rate=50): 
         """
         Sets attributes and generates depth image if regen=True
 
@@ -52,6 +53,14 @@ class DepthSlicer:
             list of dimensions for slicing 
         slice_side_length : int
             minimum slice side length for each slice (in simple method). default is 608
+        square_size : int 
+            side length of grid squares image is divided into 
+        tile_w : int 
+            number of columns in SliceGrids
+        tile_h : int 
+            number of rows in SliceGrids
+        refresh_rate : int 
+            number of frames between refreshes in SliceGridManager
         """
         self.dist_thresh = dist_thresh
         self.square_size = square_size
@@ -62,6 +71,9 @@ class DepthSlicer:
         self.precise_dims = []
         self.slice_side_length = slice_side_length
         self.path = os.path.join(os.getcwd(), "frame_disp.jpeg")
+        self.tile_w = tile_w 
+        self.tile_h = tile_h 
+        self.refresh_rate = refresh_rate
         if regen:
             self.generate_depth_image(init_frame)
             self.dims = self.calculate_dims()
@@ -243,10 +255,10 @@ class DepthSlicer:
         # Process dims by splitting up bigger boxes 
         processed_dims = self.divide_island_boxes(dims, image_shape, 250)
         
-        tile_width = 300 
+        tile_width = 300
         tile_height = 300
         
-        slice = SliceGrid(tile_width, tile_height, w=3, h=3)
+        slice = SliceGrid(tile_width, tile_height, w=self.tile_w, h=self.tile_h)
         slices = [slice]
         for dim in processed_dims: 
             if slice.full: 
@@ -256,7 +268,7 @@ class DepthSlicer:
             slice.insert_tile(dim)
         slice.create_empty_image()
 
-        slice_manager = SliceGridManager(slices, refresh_interval=10)
+        slice_manager = SliceGridManager(slices, refresh_interval=self.refresh_rate)
         
         return slice_manager
 
@@ -299,8 +311,8 @@ class DepthSlicer:
             segment_width = lower_bound + horiz_remainder / horiz_segments if horiz_segments > 1 else w
             segment_height = lower_bound + vert_remainder / vert_segments if vert_segments > 1 else h
 
-            woverlap = 0.05 * segment_width
-            hoverlap = 0.05 * segment_height
+            woverlap = 0.08 * segment_width
+            hoverlap = 0.08 * segment_height
             
             for i in range(1, horiz_segments+1): 
                 for j in range(1, vert_segments+1): 
@@ -309,10 +321,26 @@ class DepthSlicer:
                     new_dim[1] = dim[0] + (i-1) * segment_width + segment_width
                     new_dim[2] = dim[2] + (j-1) * segment_height
                     new_dim[3] = dim[2] + (j-1) * segment_height + segment_height
-                    new_dim[0] = new_dim[0] - woverlap if new_dim[0] - woverlap > 0 else 0
-                    new_dim[1] = new_dim[1] + woverlap if new_dim[1] + woverlap < image_shape[1] - 1 else image_shape[1] - 1
-                    new_dim[2] = new_dim[2] - hoverlap if new_dim[2] - hoverlap > 0 else 0
-                    new_dim[3] = new_dim[3] + hoverlap if new_dim[3] + hoverlap < image_shape[0] - 1 else image_shape[0] - 1
+                    # check if both are good, then add half of overlap 
+                    if new_dim[0] - woverlap > 0 and new_dim[1] + woverlap < image_shape[1] - 1:
+                        new_dim[0] = new_dim[0] - woverlap
+                        new_dim[1] = new_dim[1] + woverlap
+                    elif new_dim[1] + 2 * woverlap < image_shape[1] - 1: 
+                        new_dim[0] = 0
+                        new_dim[1] = new_dim[1] + 2 * woverlap
+                    elif new_dim[0] - 2 * woverlap > 0: 
+                        new_dim[1] = image_shape[1] - 0
+                        new_dim[0] = new_dim[0] - 2 * woverlap
+
+                    if new_dim[2] - hoverlap > 0 and new_dim[3] + hoverlap < image_shape[0] - 1:
+                        new_dim[2] = new_dim[2] - hoverlap
+                        new_dim[3] = new_dim[3] + hoverlap
+                    elif new_dim[3] + 2 * hoverlap < image_shape[0] - 1: 
+                        new_dim[2] = 0
+                        new_dim[3] = new_dim[3] + 2 * hoverlap
+                    elif new_dim[2] - 2 * hoverlap > 0: 
+                        new_dim[3] = image_shape[0] - 0
+                        new_dim[2] = new_dim[2] - 2 * hoverlap
                     new_dim = [int(math.floor(num)) for num in new_dim]
                     new_dim.append(index)
                     processed_dims.append(new_dim)
