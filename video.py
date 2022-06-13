@@ -1,6 +1,7 @@
 
 from depth_slicer import DepthSlicer
 from detection_utils import non_max_suppression_fast, draw_boxes
+from slice_grid_manager import SliceGridManager
 
 import argparse
 import torch 
@@ -42,48 +43,58 @@ def precise_grid_video(file_name, prop_thresh=0.9, depth_thresh=.2, square_size=
     FPS = int(video.get(cv2.CAP_PROP_FPS))  
     shape = (int(video.get(cv2.CAP_PROP_FRAME_WIDTH)), int(video.get(cv2.CAP_PROP_FRAME_HEIGHT)))
 
-    outfile = file_name.split('.')[0] + '_result_precise_grid.avi'
+    outfile = file_name.split('.')[0] + '_result_test.avi'
     video_writer = cv2.VideoWriter(outfile, cv2.VideoWriter_fourcc(*'XVID'), FPS, shape)  
 
     ret, init_frame = video.read()
 
     if ret: 
         d = DepthSlicer('precise_grid', cv2.cvtColor(init_frame, cv2.COLOR_BGR2RGB), prop_thresh, depth_thresh, 1000, True, square_size=square_size)
-        dims = d.dims
+        slice_grid_manager = d.dims
     else: 
         print('Bad Video')
         exit()
 
     frame_count = 1
+    detection_check_count = 1
 
     while True: 
         start_time = time.time()
         ret, frame = video.read()
+        images = []
         if ret: 
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             frame_count += 1
+            detection_check_count += 1
+            if detection_check_count > slice_grid_manager.refresh_interval:
+                slices = slice_grid_manager.get_slices(frame, all=True)
+                for i, new_slice in enumerate(slices): 
+                    new_slice = cv2.resize(new_slice, (640, 640), interpolation=cv2.INTER_LINEAR)
+                    images.append(new_slice)
+            else: 
+                slices = slice_grid_manager.get_slices(frame, all=False)
+                for i, new_slice in enumerate(slices): 
+                    cv2.imwrite(f'slice_{i}.jpeg', new_slice)
+                    new_slice = cv2.resize(new_slice, (640, 640), interpolation=cv2.INTER_LINEAR)
+                    images.append(new_slice)
         else: 
             print('Video finished')
             break
 
-        images = []
-        for i, dim in enumerate(dims): 
-            new_slice = dim.make_grid_image(frame)
-            cv2.imwrite(f'slice_{i}.jpeg', new_slice)
-            new_slice = cv2.resize(new_slice, (640, 640), interpolation=cv2.INTER_LINEAR)
-            images.append(new_slice)
         images.append(frame)
 
         results = model(images)
 
         final_detections = []
+        print(len(results.xyxyn))
         for index, i in enumerate(results.xyxyn):
-            # comment out .cpu() if you're on cpu
+            # remove .cpu() if you're on gpu
             labels, cord_thres = np.array(i.cpu())[:, -1], np.array(i.cpu())[:, :-1]
-            if (index < len(dims)):
+            if index < len(results.xyxyn) - 1:
                 for l, label in enumerate(labels): 
                     if label == 0: 
-                        left, right, top, bottom = dims[index].normal_to_pixel_coords(cord_thres[l])
+                        grid_index = slice_grid_manager.active_grid_indices[index]
+                        left, right, top, bottom = slice_grid_manager.grids[grid_index].normal_to_pixel_coords(cord_thres[l])
                         width = right - left 
                         height = bottom - top 
                         final_detections.append((int(label), cord_thres[l][4], (left,top,width,height)))
@@ -97,7 +108,15 @@ def precise_grid_video(file_name, prop_thresh=0.9, depth_thresh=.2, square_size=
                         width = right - left 
                         height = bottom - top 
                         final_detections.append((int(label), cord_thres[l][4], (left,top,width,height)))
-        final_detections = non_max_suppression_fast(final_detections, .7)
+        
+        if detection_check_count > slice_grid_manager.refresh_interval:
+            detection_check_count = 0
+            slice_grid_manager.check_detection()
+        
+        prev = time.time()
+        final_detections = non_max_suppression_fast(final_detections, .5)
+
+        print(f'NMS time: {time.time() - prev}')
 
         print(f'FPS: {1 / (time.time() - start_time)}')
         print(f'Frame Number: {frame_count}')
