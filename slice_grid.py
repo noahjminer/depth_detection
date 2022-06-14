@@ -188,20 +188,9 @@ class SliceGrid:
         mid_y = top + (bottom - top) / 2 
         mid_x = left + (right - left) / 2
 
-        for i in range(0, len(self.slice_coord_grid)):
-            if i + 1 < len(self.slice_coord_grid):
-                if mid_y < self.slice_coord_grid[i+1][0][1]: 
-                    y = i 
-                    break
-            else: y = i
-        
-        for i in range(0, len(self.slice_coord_grid[y])):
-            if i + 1 < len(self.slice_coord_grid[y]):
-                if mid_x < self.slice_coord_grid[y][i+1][0]: 
-                    x = i
-                    break
-            else: x = i
-        
+        x = int(math.floor(mid_x / self.tile_w))
+        y = int(math.floor(mid_y / self.tile_h))
+
         self.tiles[y*self.width+x]['detections'] = True
 
         left += self.original_coord_grid[y][x][0]

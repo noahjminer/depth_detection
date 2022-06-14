@@ -77,8 +77,8 @@ def precise_test(file_name):
                     top = dims[index][2] + cord_thres[l][1] * (dims[index][3] - dims[index][2])
                     right = dims[index][0] + cord_thres[l][2] * (dims[index][1] - dims[index][0])
                     bottom = dims[index][2] + cord_thres[l][3] * (dims[index][3] - dims[index][2])
-                    width = right - left 
-                    height = bottom - top 
+                    width = right - left
+                    height = bottom - top
                     final_detections.append((int(label), cord_thres[l][4], (left,top,width,height)))
         else: 
             for l, label in enumerate(labels): 

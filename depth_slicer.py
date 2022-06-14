@@ -29,7 +29,7 @@ class DepthSlicer:
             closer  
         """
     def __init__(self, method, init_frame, proportion_thresh, dist_thresh, slice_side_length=608, regen=True, square_size=100,
-                tile_w=3, tile_h=4, refresh_rate=50): 
+                grid_w=3, grid_h=4, refresh_rate=50): 
         """
         Sets attributes and generates depth image if regen=True
 
@@ -71,8 +71,8 @@ class DepthSlicer:
         self.precise_dims = []
         self.slice_side_length = slice_side_length
         self.path = os.path.join(os.getcwd(), "frame_disp.jpeg")
-        self.tile_w = tile_w 
-        self.tile_h = tile_h 
+        self.grid_w = grid_w 
+        self.grid_h = grid_h 
         self.refresh_rate = refresh_rate
         if regen:
             self.generate_depth_image(init_frame)
@@ -234,9 +234,11 @@ class DepthSlicer:
         
         # Process connected blobs into one box
         dims = self.create_bounding_box_for_islands(blobs, image_shape, self.square_size)
+
+        processed_dims, _, _ = self.divide_island_boxes(dims, image_shape, self.slice_side_length)
         
         # Process dims by splitting up bigger boxes 
-        return self.divide_island_boxes(dims, image_shape, self.slice_side_length)
+        return processed_dims
 
 
     def calculate_precise_grid_dims(self): 
@@ -253,18 +255,22 @@ class DepthSlicer:
         dims = self.create_bounding_box_for_islands(blobs, image_shape, self.square_size)
         
         # Process dims by splitting up bigger boxes 
-        processed_dims = self.divide_island_boxes(dims, image_shape, 250)
+        processed_dims, max_w, max_h = self.divide_island_boxes(dims, image_shape, self.slice_side_length)
+
+        self.processed_dims = processed_dims
         
-        tile_width = 300
-        tile_height = 300
+        tile_width = int(max_w) 
+        tile_height = int(max_h)
         
-        slice = SliceGrid(tile_width, tile_height, w=self.tile_w, h=self.tile_h)
+        slice = SliceGrid(tile_width, tile_height, w=self.grid_w, h=self.grid_h)
         slices = [slice]
         for dim in processed_dims: 
             if slice.full: 
                 slice.create_empty_image()
-                slice = SliceGrid(tile_width, tile_height)
+                slice = SliceGrid(tile_width, tile_height, w=self.grid_w, h=self.grid_h)
                 slices.append(slice)
+            if dim[3] - dim[2] > tile_height: dim[3] -= dim[3] - dim[2] - tile_height
+            if dim[1] - dim[0] > tile_width: dim[1] -= dim[1] - dim[0] - tile_width
             slice.insert_tile(dim)
         slice.create_empty_image()
 
@@ -291,6 +297,8 @@ class DepthSlicer:
             value with which bounding boxes will be divided
         """
         processed_dims = [] 
+        max_w = 0
+        max_h = 0
         for index, dim in enumerate(dims): 
             w = dim[1] - dim[0]
             h = dim[3] - dim[2]
@@ -311,8 +319,11 @@ class DepthSlicer:
             segment_width = lower_bound + horiz_remainder / horiz_segments if horiz_segments > 1 else w
             segment_height = lower_bound + vert_remainder / vert_segments if vert_segments > 1 else h
 
-            woverlap = 0.08 * segment_width
-            hoverlap = 0.08 * segment_height
+            woverlap = 0.1 * segment_width # NEEDS PARAMATERIZATION
+            hoverlap = 0.1 * segment_height
+
+            max_w = segment_width + 2 * woverlap if segment_width + 2 * woverlap > max_w else max_w
+            max_h = segment_height + 2 * hoverlap if segment_height + 2 * hoverlap > max_h else max_h
             
             for i in range(1, horiz_segments+1): 
                 for j in range(1, vert_segments+1): 
@@ -344,7 +355,7 @@ class DepthSlicer:
                     new_dim = [int(math.floor(num)) for num in new_dim]
                     new_dim.append(index)
                     processed_dims.append(new_dim)
-        return processed_dims
+        return processed_dims, max_w, max_h
 
     def generate_depth_graph(self, lower_bound, square_size): 
         """

@@ -1,7 +1,6 @@
 
 from depth_slicer import DepthSlicer
 from detection_utils import non_max_suppression_fast, draw_boxes
-from slice_grid_manager import SliceGridManager
 
 import argparse
 import torch 
@@ -10,6 +9,17 @@ import numpy as np
 import signal
 import time
 import threading
+
+#################
+#    TODO 
+#################
+
+# 1. Do os path for all inputs / outputs for OS compatability 
+# 2. Try out batch detection 
+# 3. Optimize ?? 
+# 4. Edge case on precise grid
+# 5. Done ? 
+
 
 # Globals 
 # Video Writer
@@ -40,7 +50,7 @@ def precise_grid_video(args, file_name, prop_thresh=0.9, depth_thresh=.2, square
     global video_writer
 
     model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
-    model.to('cpu')
+    model.to('cuda') if torch.cuda.is_available() else model.to('cpu')
 
     video = cv2.VideoCapture(file_name)
     FPS = int(video.get(cv2.CAP_PROP_FPS))  
@@ -52,7 +62,7 @@ def precise_grid_video(args, file_name, prop_thresh=0.9, depth_thresh=.2, square
     ret, init_frame = video.read()
 
     if ret: 
-        d = DepthSlicer('precise_grid', cv2.cvtColor(init_frame, cv2.COLOR_BGR2RGB), prop_thresh, depth_thresh, 1000, True, 
+        d = DepthSlicer('precise_grid', cv2.cvtColor(init_frame, cv2.COLOR_BGR2RGB), prop_thresh, depth_thresh, args.slice_side_length, True, 
                         square_size=square_size, grid_w=args.grid_width, grid_h=args.grid_height, refresh_rate=args.refresh_rate)
         slice_grid_manager = d.dims
     else: 
@@ -61,10 +71,11 @@ def precise_grid_video(args, file_name, prop_thresh=0.9, depth_thresh=.2, square
 
     frame_count = 1
     detection_check_count = 1
+    start_time = time.time()
 
     while True: 
-        start_time = time.time()
         ret, frame = video.read()
+        frame_time = time.time()
         images = []
         if ret: 
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -73,7 +84,7 @@ def precise_grid_video(args, file_name, prop_thresh=0.9, depth_thresh=.2, square
             if detection_check_count > slice_grid_manager.refresh_interval:
                 slices = slice_grid_manager.get_slices(frame, all=True)
                 for i, new_slice in enumerate(slices): 
-                    new_slice = cv2.resize(new_slice, (640, 640), interpolation=cv2.INTER_LINEAR)
+                    # new_slice = cv2.resize(new_slice, (640, 640), interpolation=cv2.INTER_LINEAR)
                     images.append(new_slice)
             else: 
                 slices = slice_grid_manager.get_slices(frame, all=False)
@@ -85,22 +96,21 @@ def precise_grid_video(args, file_name, prop_thresh=0.9, depth_thresh=.2, square
             print('Video finished')
             break
 
-        images.append(frame)
-
+        images.append(cv2.resize(frame,  (640, 640), interpolation=cv2.INTER_LINEAR))
+        
         results = model(images)
+        results.print()
 
         final_detections = []
-        print(len(results.xyxyn))
         for index, i in enumerate(results.xyxyn):
-            # remove .cpu() if you're on gpu
             labels, cord_thres = np.array(i.cpu())[:, -1], np.array(i.cpu())[:, :-1]
             if index < len(results.xyxyn) - 1:
                 for l, label in enumerate(labels): 
                     if label == 0: 
                         grid_index = slice_grid_manager.active_grid_indices[index]
                         left, right, top, bottom = slice_grid_manager.grids[grid_index].normal_to_pixel_coords(cord_thres[l])
-                        width = right - left 
-                        height = bottom - top 
+                        width = right - left
+                        height = bottom - top
                         final_detections.append((int(label), cord_thres[l][4], (left,top,width,height)))
             else: 
                 for l, label in enumerate(labels): 
@@ -109,27 +119,25 @@ def precise_grid_video(args, file_name, prop_thresh=0.9, depth_thresh=.2, square
                         top =  cord_thres[l][1] * shape[1]
                         right = cord_thres[l][2] * shape[0]
                         bottom = cord_thres[l][3] * shape[1]
-                        width = right - left 
-                        height = bottom - top 
+                        width = right - left
+                        height = bottom - top
                         final_detections.append((int(label), cord_thres[l][4], (left,top,width,height)))
         
         if detection_check_count > slice_grid_manager.refresh_interval:
             detection_check_count = 0
             slice_grid_manager.check_detection()
         
-        prev = time.time()
+        final_detections = [detection for detection in final_detections if detection[1] > .1]
         final_detections = non_max_suppression_fast(final_detections, .5)
 
-        print(f'NMS time: {time.time() - prev}')
-
-        print(f'FPS: {1 / (time.time() - start_time)}')
         print(f'Frame Number: {frame_count}')
         image = draw_boxes(final_detections, frame, draw_dims=True, dims=d.precise_dims, dims_color=(255,0,255))
         video_write_buffer = threading.Thread(target=write_frame, args=(image,))
         video_write_buffer.start()
-
+        print(f'FPS: {1/(time.time()-frame_time)}')
+    print(f'Average FPS: {frame_count / (time.time()-start_time):.2f}')
     video_writer.release()
-        
+ 
 
 def precise_video(file_name, prop_thresh=0.9, depth_thresh=.2, square_size=50, slice_side_length=800):
     global video_writer
@@ -155,9 +163,9 @@ def precise_video(file_name, prop_thresh=0.9, depth_thresh=.2, square_size=50, s
         exit()
 
     frame_count = 1
-
+    start_time = time.time()
     while True: 
-        start_time = time.time()
+        frame_time = time.time()
         ret, frame = video.read()
         if ret: 
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -200,15 +208,15 @@ def precise_video(file_name, prop_thresh=0.9, depth_thresh=.2, square_size=50, s
                         final_detections.append((int(label), cord_thres[l][4], (left,top,width,height)))
         final_detections = non_max_suppression_fast(final_detections, .7)
 
-        print(f'FPS: {1 / (time.time() - start_time)}')
+        print(f'FPS: {1 / (time.time() - frame_time)}')
         print(f'Frame Number: {frame_count}')
         image = draw_boxes(final_detections, frame, draw_dims=True, dims=d.dims, dims_color=(255,0,255))
         video_write_buffer = threading.Thread(target=write_frame, args=(image,))
         video_write_buffer.start()
-
+    print(f'AVG FPS: {frame_count/(time.time()-start_time):2f}')
     video_writer.release()
 
-def exit_handler(sigint, frame): 
+def exit_handler(sigint, frame):
     global video_writer 
     video_writer.release()
     exit(0)
