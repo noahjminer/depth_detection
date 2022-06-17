@@ -2,3 +2,4 @@
 *.jpg 
 *.npy 
 models/*
+stats/*

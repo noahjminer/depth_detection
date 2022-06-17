@@ -3,12 +3,19 @@ from depth_slicer import DepthSlicer
 from detection_utils import non_max_suppression_fast, draw_boxes
 
 import argparse
-import torch 
+import contextlib
+import cProfile, pstats
+import io
+import torch, torchvision
+import torch.cuda.profiler as profiler
+import pyprof
 import cv2
 import numpy as np
 import signal
 import time
 import threading
+
+from pstats import SortKey
 
 #################
 #    TODO 
@@ -24,6 +31,14 @@ import threading
 # Globals 
 # Video Writer
 video_writer = None
+
+@contextlib.contextmanager 
+def nvtx_range(msg):
+    depth = torch.cuda.nvtx.range_push(msg) 
+    try: 
+        yield depth 
+    finally: 
+        torch.cuda.nvtx.range_pop()
 
 def parse_args(): 
     parser = argparse.ArgumentParser(
@@ -99,8 +114,7 @@ def precise_grid_video(args, file_name, prop_thresh=0.9, depth_thresh=.2, square
         images.append(cv2.resize(frame,  (640, 640), interpolation=cv2.INTER_LINEAR))
         
         results = model(images)
-        results.print()
-
+    
         final_detections = []
         for index, i in enumerate(results.xyxyn):
             labels, cord_thres = np.array(i.cpu())[:, -1], np.array(i.cpu())[:, :-1]
@@ -126,7 +140,7 @@ def precise_grid_video(args, file_name, prop_thresh=0.9, depth_thresh=.2, square
         if detection_check_count > slice_grid_manager.refresh_interval:
             detection_check_count = 0
             slice_grid_manager.check_detection()
-        
+
         final_detections = [detection for detection in final_detections if detection[1] > .1]
         final_detections = non_max_suppression_fast(final_detections, .5)
 
@@ -139,8 +153,11 @@ def precise_grid_video(args, file_name, prop_thresh=0.9, depth_thresh=.2, square
     video_writer.release()
  
 
-def precise_video(file_name, prop_thresh=0.9, depth_thresh=.2, square_size=50, slice_side_length=800):
+def precise_video(args, file_name, prop_thresh=0.9, depth_thresh=.2, square_size=50, slice_side_length=800):
     global video_writer
+
+    pr = cProfile.Profile()
+    pr.enable()
 
     model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
     model.to('cuda' if torch.cuda.is_available() else 'cpu')
@@ -214,6 +231,14 @@ def precise_video(file_name, prop_thresh=0.9, depth_thresh=.2, square_size=50, s
         video_write_buffer = threading.Thread(target=write_frame, args=(image,))
         video_write_buffer.start()
     print(f'AVG FPS: {frame_count/(time.time()-start_time):2f}')
+    pr.disable()
+    s = io.StringIO()
+    ps = pstats.Stats(pr, stream=s).sort_stats('cumtime')
+    ps.print_stats()
+    ps.dump_stats('./stats/cprofile')
+    out_stream = open(f'./stats/stats_{args.method}', 'w')
+    ps = pstats.Stats('./stats/cprofile', stream=out_stream)
+    ps.strip_dirs().sort_stats('cumulative').print_stats()
     video_writer.release()
 
 def exit_handler(sigint, frame):
@@ -224,7 +249,8 @@ def exit_handler(sigint, frame):
 if __name__ == "__main__":
     args = parse_args()
     signal.signal(signal.SIGINT, exit_handler)
+   
     if args.method == 'precise_grid': 
         precise_grid_video(args, args.path, args.prop_thresh, args.depth_thresh, args.square_size)
     else: 
-        precise_video(args.path, args.prop_thresh, args.depth_thresh, args.square_size, args.slice_side_length)
+        precise_video(args, args.path, args.prop_thresh, args.depth_thresh, args.square_size, args.slice_side_length)
