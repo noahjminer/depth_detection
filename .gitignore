@@ -3,3 +3,5 @@
 *.npy 
 models/*
 stats/*
+*.mp4 
+*.avi

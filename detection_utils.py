@@ -1,12 +1,12 @@
 import cv2 
 import numpy as np
 
-def draw_boxes(detections, image, draw_dims=False, dims=None, dims_color=(0,255,255)):
-    for label, confidence, bbox in detections:
-        left, top, right, bottom = (int(bbox[0]), int(bbox[1]), int(bbox[0]) + int(bbox[2]), int(bbox[1]) + int(bbox[3]))
-        cv2.rectangle(image, (left, top), (right, bottom), (255,255,255), 3)
-        cv2.putText(image, "{} [{:.2f}]".format(label, float(confidence)),
-                    (left, top - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+def draw_boxes(bboxes, scores, labels, image, draw_dims=False, dims=None, dims_color=(0,255,255)):
+    for i, bbox in enumerate(bboxes):
+        bbox = [int(num) for num in bbox]
+        cv2.rectangle(image, (bbox[0], bbox[2]), (bbox[1], bbox[3]), (255,255,255), 3)
+        cv2.putText(image, "{} [{:.2f}]".format(labels[i], float(scores[i])),
+                    (bbox[0], bbox[1] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                     (0,255,255), 4)
     if draw_dims: 
         for dim in dims: 

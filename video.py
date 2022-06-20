@@ -12,9 +12,9 @@ import pyprof
 import cv2
 import numpy as np
 import signal
+import queue
 import time
-import threading
-
+from threading import Thread
 from pstats import SortKey
 
 #################
@@ -65,7 +65,8 @@ def precise_grid_video(args, file_name, prop_thresh=0.9, depth_thresh=.2, square
     global video_writer
 
     model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
-    model.to('cuda') if torch.cuda.is_available() else model.to('cpu')
+    device = torch.device('cuda') if torch.cuda.is_available() else model.to('cpu')
+    preprocess = torchvision.transforms.ToTensor()
 
     video = cv2.VideoCapture(file_name)
     FPS = int(video.get(cv2.CAP_PROP_FPS))  
@@ -99,25 +100,26 @@ def precise_grid_video(args, file_name, prop_thresh=0.9, depth_thresh=.2, square
             if detection_check_count > slice_grid_manager.refresh_interval:
                 slices = slice_grid_manager.get_slices(frame, all=True)
                 for i, new_slice in enumerate(slices): 
-                    # new_slice = cv2.resize(new_slice, (640, 640), interpolation=cv2.INTER_LINEAR)
+                    new_slice = cv2.resize(new_slice,  (640, 640), interpolation=cv2.INTER_LINEAR)
                     images.append(new_slice)
             else: 
                 slices = slice_grid_manager.get_slices(frame, all=False)
                 for i, new_slice in enumerate(slices): 
                     cv2.imwrite(f'slice_{i}.jpeg', new_slice)
-                    new_slice = cv2.resize(new_slice, (640, 640), interpolation=cv2.INTER_LINEAR)
+                    new_slice =cv2.resize(new_slice,  (640, 640), interpolation=cv2.INTER_LINEAR)
                     images.append(new_slice)
         else: 
             print('Video finished')
             break
 
         images.append(cv2.resize(frame,  (640, 640), interpolation=cv2.INTER_LINEAR))
-        
-        results = model(images)
-    
+
+        with torch.no_grad():
+            results = model(images)
+
         final_detections = []
         for index, i in enumerate(results.xyxyn):
-            labels, cord_thres = np.array(i.cpu())[:, -1], np.array(i.cpu())[:, :-1]
+            labels, cord_thres = np.array(i)[:, -1], np.array(i.cpu())[:, :-1]
             if index < len(results.xyxyn) - 1:
                 for l, label in enumerate(labels): 
                     if label == 0: 
@@ -146,91 +148,159 @@ def precise_grid_video(args, file_name, prop_thresh=0.9, depth_thresh=.2, square
 
         print(f'Frame Number: {frame_count}')
         image = draw_boxes(final_detections, frame, draw_dims=True, dims=d.precise_dims, dims_color=(255,0,255))
-        video_write_buffer = threading.Thread(target=write_frame, args=(image,))
+        video_write_buffer = Thread(target=write_frame, args=(image,))
         video_write_buffer.start()
         print(f'FPS: {1/(time.time()-frame_time)}')
     print(f'Average FPS: {frame_count / (time.time()-start_time):.2f}')
     video_writer.release()
- 
+
+global_cap = None
+frame_queue = None 
+image_queue = None
+frame_count = 1
+
+def video_capture(frame_queue, image_queue): 
+    global global_cap
+
+    while global_cap.isOpened(): 
+        ret, frame = global_cap.read()
+        if not ret: 
+            image_queue.put(None)
+            frame_queue.put(None)
+            break 
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frame_queue.put(frame)
+        image_queue.put(frame_rgb)
+
+def precise_pre_process(frame, dims):
+    images = []
+    for i, dim in enumerate(dims):
+        new_slice = frame[dim[2]:dim[3],dim[0]:dim[1]]
+        new_slice = cv2.resize(new_slice, (640, 640), interpolation=cv2.INTER_LINEAR)
+        images.append(new_slice)
+    images.append(cv2.resize(frame, (640, 640), interpolation=cv2.INTER_LINEAR))
+    return images
+
+def inference(model, image_queue, detections_queue, fps_queue, dims): 
+    global global_cap
+    while global_cap.isOpened(): 
+        frame = image_queue.get() 
+        if frame is None: 
+            break 
+        prev_time = time.time() 
+
+        images = precise_pre_process(frame, dims)
+        result = model(images)
+
+        detections_queue.put(result)
+        fps = float(1/(time.time()-prev_time))
+        fps_queue.put(fps)
+        print(f'FPS: {fps}')
+    
+def drawing(frame_queue, detections_queue, dims, hw_dims, fps_queue):
+    global video_writer, global_cap, frame_count
+
+    while global_cap.isOpened(): 
+        frame = frame_queue.get()
+        if frame is None: break
+        results = detections_queue.get()
+        fps = fps_queue.get()
+        bboxes, scores, labels = precise_post_process(results, hw_dims)
+        image = draw_boxes(bboxes, scores, labels, frame, draw_dims=True, dims=dims, dims_color=(255,0,255))
+        frame_count += 1
+        write_frame(image)
+        if cv2.waitKey(int(fps)) == 27:
+            break
+    global_cap.release()
+    video_writer.release()
+
+def precise_post_process(results, hw_dims): 
+    cords = []
+    scores = []
+    labels = []
+    for i, result in enumerate(results.xyxy):
+        # get labels, cords, scores
+        labels.append(result[:, -1])
+        cord_thres = result[:, :4]
+        score = result[:, 4:-1]
+
+        # multiply coordinates to original pixel space (l, t, r, b)
+        cord_thres[:, :2] = cord_thres[:, :2] + hw_dims[i, 1]
+        cord_thres[:, 2:-1] = cord_thres[:, 2:-1] + hw_dims[i, 0]
+
+        cords.append(cord_thres)
+        scores.append(score)
+    
+    all_cords = torch.cat(cords)
+    all_labels = torch.cat(labels)
+    all_scores = torch.cat(scores).view(-1)
+
+    nms_mask = torchvision.ops.boxes.batched_nms(all_cords, all_scores, all_labels, iou_threshold=0.7)
+    
+    bboxes = all_cords[nms_mask].cpu().numpy()
+    scores = all_scores[nms_mask].cpu().numpy()
+    labels = all_labels[nms_mask].cpu().numpy()
+    return bboxes, scores, labels
 
 def precise_video(args, file_name, prop_thresh=0.9, depth_thresh=.2, square_size=50, slice_side_length=800):
-    global video_writer
+    global video_writer, global_cap, frame_queue, image_queue, frame_count
 
     pr = cProfile.Profile()
     pr.enable()
 
-    model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
-    model.to('cuda' if torch.cuda.is_available() else 'cpu')
+    model_dtype = torch.float16
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') 
+    print(torch.version.cuda)
 
-    video = cv2.VideoCapture(file_name)
-    FPS = int(video.get(cv2.CAP_PROP_FPS))  
-    shape = (int(video.get(cv2.CAP_PROP_FRAME_WIDTH)), int(video.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+    model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True).eval().to(device)
+    model.conf = .2 
+    model.iou = .25
+
+    global_cap = cv2.VideoCapture(file_name)
+    FPS = int(global_cap.get(cv2.CAP_PROP_FPS))  
+    shape = (int(global_cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(global_cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
 
     outfile = file_name.split('.')[0] + '_result_precise.avi'
     video_writer = cv2.VideoWriter(outfile, cv2.VideoWriter_fourcc(*'XVID'), FPS, shape)  
 
-    ret, init_frame = video.read()
+    ret, init_frame = global_cap.read()
 
     if ret: 
         d = DepthSlicer('precise', cv2.cvtColor(init_frame, cv2.COLOR_BGR2RGB), prop_thresh, depth_thresh, slice_side_length=slice_side_length, regen=True, square_size=square_size)
         dims = d.dims
-        print(dims)
+        hw_dims = [] 
+        for dim in dims: 
+            hw_dims.append([dim[2], dim[0]])
+        hw_dims.append([0, 0])
     else: 
         print('Bad Video')
         exit()
 
+    # turn dims to tensor
+    hw_dims = torch.tensor(hw_dims, dtype=model_dtype, device=device)
+
     frame_count = 1
     start_time = time.time()
-    while True: 
-        frame_time = time.time()
-        ret, frame = video.read()
-        if ret: 
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frame_count += 1
-        else: 
-            print('Video finished')
-            break
+    
+    frame_queue = queue.Queue()
+    image_queue = queue.Queue(maxsize=1)
+    detections_queue = queue.Queue(maxsize = 1)
+    fps_queue = queue.Queue(maxsize=1)
 
-        images = []
-        for i, dim in enumerate(dims): 
-            new_slice = frame[dim[2]:dim[3],dim[0]:dim[1]]
-            new_slice = cv2.resize(new_slice, (640, 640), interpolation=cv2.INTER_LINEAR)
-            images.append(new_slice)
-        images.append(frame)
+    capture_thread = Thread(target=video_capture, args=(frame_queue,image_queue))
+    inference_thread = Thread(target=inference, args=(model, image_queue, detections_queue, fps_queue, dims))
+    drawing_thread = Thread(target=drawing, args=(frame_queue, detections_queue, dims, hw_dims, fps_queue))
 
-        results = model(images)
+    capture_thread.start()
+    inference_thread.start()
+    drawing_thread.start()
 
-        final_detections = []
-        for index, i in enumerate(results.xyxyn):
-            labels, cord_thres = i.cpu()[:, -1].numpy(), i.cpu()[:, :-1].numpy()
-            if (index < len(dims)):
-                for l, label in enumerate(labels): 
-                    if label == 0: 
-                        left = dims[index][0] + cord_thres[l][0] * (dims[index][1] - dims[index][0])
-                        top = dims[index][2] + cord_thres[l][1] * (dims[index][3] - dims[index][2])
-                        right = dims[index][0] + cord_thres[l][2] * (dims[index][1] - dims[index][0])
-                        bottom = dims[index][2] + cord_thres[l][3] * (dims[index][3] - dims[index][2])
-                        width = right - left 
-                        height = bottom - top 
-                        final_detections.append((int(label), cord_thres[l][4], (left,top,width,height)))
-            else: 
-                for l, label in enumerate(labels): 
-                    if label == 0: 
-                        left = cord_thres[l][0] * shape[0]
-                        top =  cord_thres[l][1] * shape[1]
-                        right = cord_thres[l][2] * shape[0]
-                        bottom = cord_thres[l][3] * shape[1]
-                        width = right - left 
-                        height = bottom - top 
-                        final_detections.append((int(label), cord_thres[l][4], (left,top,width,height)))
-        final_detections = non_max_suppression_fast(final_detections, .7)
+    capture_thread.join()
+    inference_thread.join()
+    drawing_thread.join()
 
-        print(f'FPS: {1 / (time.time() - frame_time)}')
-        print(f'Frame Number: {frame_count}')
-        image = draw_boxes(final_detections, frame, draw_dims=True, dims=d.dims, dims_color=(255,0,255))
-        video_write_buffer = threading.Thread(target=write_frame, args=(image,))
-        video_write_buffer.start()
     print(f'AVG FPS: {frame_count/(time.time()-start_time):2f}')
+
     pr.disable()
     s = io.StringIO()
     ps = pstats.Stats(pr, stream=s).sort_stats('cumtime')
@@ -242,9 +312,18 @@ def precise_video(args, file_name, prop_thresh=0.9, depth_thresh=.2, square_size
     video_writer.release()
 
 def exit_handler(sigint, frame):
-    global video_writer 
-    video_writer.release()
-    exit(0)
+    global global_cap, video_writer, frame_queue, image_queue
+    print("exiting")
+    if frame_queue:
+        frame_queue.put(None)
+    if image_queue:
+        image_queue.put(None)
+    if global_cap:
+        global_cap.release()
+    if video_writer:
+        video_writer.release()
+    time.sleep(1)
+    print("exiting sucessfully")
 
 if __name__ == "__main__":
     args = parse_args()
