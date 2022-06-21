@@ -7,8 +7,6 @@ import contextlib
 import cProfile, pstats
 import io
 import torch, torchvision
-import torch.cuda.profiler as profiler
-import pyprof
 import cv2
 import numpy as np
 import signal
@@ -79,7 +77,7 @@ def video_capture(frame_queue, image_queue):
         frame_queue.put(frame)
         image_queue.put(frame_rgb)
 
-def inference_grid(model, image_queue, detections_queue, active_indices_queue, fps_queue): 
+def inference_grid(model, image_queue, detections_queue, active_indices_queue, fps_queue, shape): 
     global global_cap, frame_count, slice_grid_manager
 
     while global_cap.isOpened():
@@ -104,9 +102,13 @@ def inference_grid(model, image_queue, detections_queue, active_indices_queue, f
         images.append(cv2.resize(frame,  (640, 640), interpolation=cv2.INTER_LINEAR))
 
         with torch.no_grad():
-            result = model(images)
+            results = model(images)
 
-        detections_queue.put(result)
+        final_detections = precise_grid_postprocess(results, slice_grid_manager, slice_grid_manager.active_grid_indices, shape)
+        if slice_grid_manager.frame_count > slice_grid_manager.refresh_interval:
+            slice_grid_manager.frame_count  = 0
+            slice_grid_manager.check_detection()
+        detections_queue.put(final_detections)
         active_indices_queue.put(slice_grid_manager.active_grid_indices)
         fps = float(1/(time.time()-prev_time))
         fps_queue.put(fps)
@@ -117,14 +119,10 @@ def drawing_grid(frame_queue, detections_queue, fps_queue, active_indices_queue,
     while global_cap.isOpened(): 
         frame = frame_queue.get()
         if frame is None: break
-        results = detections_queue.get()
+        detections = detections_queue.get()
         active_indices = active_indices_queue.get()
         fps = fps_queue.get()
-        final_detections = precise_grid_postprocess(results, slice_grid_manager, active_indices, shape)
-        if slice_grid_manager.frame_count > slice_grid_manager.refresh_interval:
-            slice_grid_manager.frame_count  = 0
-            slice_grid_manager.check_detection()
-        final_detections = [detection for detection in final_detections if detection[1] > .1]
+        final_detections = [detection for detection in detections if detection[1] > .1]
         final_detections = non_max_suppression_fast(final_detections, .5)
         image = draw_boxes_grid(final_detections, frame)
         frame_count += 1
@@ -196,7 +194,7 @@ def precise_grid_video(args, file_name, prop_thresh=0.9, depth_thresh=.2, square
     fps_queue = queue.Queue(maxsize=1)
 
     capture_thread = Thread(target=video_capture, args=(frame_queue,image_queue))
-    inference_thread = Thread(target=inference_grid, args=(model, image_queue, detections_queue, active_indices_queue, fps_queue))
+    inference_thread = Thread(target=inference_grid, args=(model, image_queue, detections_queue, active_indices_queue, fps_queue, shape))
     drawing_thread = Thread(target=drawing_grid, args=(frame_queue, detections_queue, fps_queue, active_indices_queue, shape))
 
     capture_thread.start()
@@ -205,7 +203,7 @@ def precise_grid_video(args, file_name, prop_thresh=0.9, depth_thresh=.2, square
 
     try: 
         while capture_thread.is_alive():
-            time.sleep(1)
+            time.sleep()
     except KeyboardInterrupt: 
         os._exit(getattr(os, "_exitcode", 0))
 

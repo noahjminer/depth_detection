@@ -191,7 +191,6 @@ class SliceGrid:
         x = int(math.floor(mid_x / self.tile_w))
         y = int(math.floor(mid_y / self.tile_h))
 
-        print(f'len {len(tiles)}')
         self.tiles[y*self.width+x]['detections'] = True
 
         left += self.original_coord_grid[y][x][0]
