@@ -3,9 +3,24 @@ import numpy as np
 
 def draw_boxes(bboxes, scores, labels, image, draw_dims=False, dims=None, dims_color=(0,255,255)):
     for i, bbox in enumerate(bboxes):
+        if labels[i] != 0: continue
         bbox = [int(num) for num in bbox]
-        cv2.rectangle(image, (bbox[0], bbox[2]), (bbox[1], bbox[3]), (255,255,255), 3)
+        cv2.rectangle(image, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (255,255,255), 3)
         cv2.putText(image, "{} [{:.2f}]".format(labels[i], float(scores[i])),
+                    (bbox[0], bbox[1] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                    (0,255,255), 4)
+    if draw_dims: 
+        for dim in dims: 
+            cv2.rectangle(image, (dim[0], dim[2]), (dim[1], dim[3]), dims_color, 3)
+    return image
+
+def draw_boxes_grid(final_detections, image, draw_dims=False, dims=None, dims_color=(0,255,255)):
+    for i, detection in enumerate(final_detections):
+        if detection[0] != 0: continue
+        bbox = detection[2]
+        bbox = [int(num) for num in bbox]
+        cv2.rectangle(image, (bbox[0], bbox[1]), (bbox[0] + bbox[2], bbox[1] + bbox[3]), (255,255,255), 3)
+        cv2.putText(image, "{} [{:.2f}]".format(detection[0], detection[1]),
                     (bbox[0], bbox[1] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                     (0,255,255), 4)
     if draw_dims: 

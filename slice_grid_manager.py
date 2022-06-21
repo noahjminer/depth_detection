@@ -30,6 +30,7 @@ class SliceGridManager:
         self.active_grid_indices = []
         self.front_grid_index = 0
         self.refresh_interval = refresh_interval
+        self.frame_count = 0
     
     def get_slices(self, frame, all=False): 
         """
