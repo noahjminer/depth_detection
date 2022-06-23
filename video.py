@@ -7,6 +7,7 @@ import contextlib
 import cProfile, pstats
 import io
 import torch, torchvision
+import torch.cuda.profiler as profiler
 import cv2
 import numpy as np
 import signal
@@ -326,7 +327,6 @@ def precise_video(args, file_name, prop_thresh=0.9, depth_thresh=.2, square_size
         for dim in dims: 
             tlhw_dims.append([dim[2], dim[0], dim[3]-dim[2], dim[1]-dim[0]])
         tlhw_dims.append([0, 0, shape[1], shape[0]])
-
     else: 
         print('Bad Video')
         exit()
