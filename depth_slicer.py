@@ -228,12 +228,30 @@ class DepthSlicer:
         None
         """
         graph, image_shape = self.generate_depth_graph(0, self.square_size)
-        
+
         # Connect islands into one list
         blobs = self.connect_squares_into_islands(graph)
+
+        sorted_blobs = [sorted(blob, key=lambda tup: tup[0]) for blob in blobs]
+        blobs_2d = []
+        for blob in sorted_blobs:
+            blobs_rows = []
+            blob_row = []
+            curr_row = blob[0][0]
+            for coord in blob:
+                if coord[0] == curr_row: 
+                    blob_row.append(coord)
+                else:
+                    blobs_rows.append(blob_row)
+                    curr_row = coord[0]
+                    blob_row = [coord]
+            blobs_2d.append(blobs_rows)
         
+        for i, blob in enumerate(blobs_2d): 
+            blobs_2d[i] = [sorted(row, key=lambda coord: coord[1]) for row in blob]
+                
         # Process connected blobs into one box
-        dims = self.create_bounding_box_for_islands(blobs, image_shape, self.square_size)
+        dims = self.create_bounding_box_for_islands(blobs_2d, image_shape, self.square_size)
 
         processed_dims, _, _ = self.divide_island_boxes(dims, image_shape, self.slice_side_length)
         
@@ -395,21 +413,19 @@ class DepthSlicer:
             Graph previously generated in generate_depth_graph
         """
         blobs = []
-        for node in graph: 
+        for node in graph:
             graph.remove(node)
             blob = [node]
             neighbors = self.get_neighbors(node, graph)
             while len(neighbors) > 0: 
                 neighbor = neighbors.pop()
+                if neighbor in blob: continue
                 blob.append(neighbor)
-                try:
-                    if graph.count(neighbor) > 0:
-                        graph.remove(neighbor)
-                except ValueError as e: 
-                    print(e)
-                    print(neighbor)
-                    break
-                neighbors = neighbors + self.get_neighbors(neighbor, graph)
+                if graph.count(neighbor) > 0:
+                    graph.remove(neighbor)
+                    neighbors = neighbors + self.get_neighbors(neighbor, graph)
+                else: 
+                    continue
             blobs.append(blob) 
         return blobs
 
@@ -429,25 +445,51 @@ class DepthSlicer:
         square_size : int 
             Length of square side. Multiplied by grid coordinate values to get pixel coordinates
         """
-
         dims = []
         for blob in blobs: 
             xmin = 100
             ymin = 100
             xmax = 0
             ymax = 0
-            for coord in blob: 
-                # FOR VISUALIZING GRID 
-                xl = coord[1] * square_size
-                xr = image_shape[1] - 1 if coord[1] * square_size + square_size > image_shape[1] else coord[1] * square_size + square_size 
-                yt = coord[0] * square_size
-                yb = image_shape[0] - 1 if coord[0] * square_size + square_size > image_shape[0] else coord[0] * square_size + square_size 
-                self.precise_dims.append((xl, xr, yt, yb))
-                # END 
-                if coord[0] < ymin: ymin = coord[0]
-                if coord[1] < xmin: xmin = coord[1]
-                if coord[0] > ymax: ymax = coord[0]
-                if coord[1] > xmax: xmax = coord[1]
+
+            avg_xmax = 0
+            avg_xmin = 0
+            max_cols = 0
+            for row in blob:
+                if len(row) <= 1: continue
+                if len(row) > max_cols: max_cols = len(row)
+                avg_xmax += row[-1][1]
+                avg_xmin += row[0][1]
+            avg_xmax /= len(blob)
+            avg_xmin /= len(blob)
+
+            ymin_max = np.array([[100,0] for i in range(max_cols)])
+            for row in blob:
+                for coord in row:
+                    #  if y is less than min 
+                    if coord[0] < ymin_max[coord[1]][0]: ymin_max[coord[1]][0] = coord[0]
+                    if coord[0] > ymin_max[coord[1]][1]: ymin_max[coord[1]][1] = coord[0]
+            avg_ymin = sum(ymin_max[:, 0]) / len(ymin_max)
+            avg_ymax = sum(ymin_max[:, 1]) / len(ymin_max)
+
+            for y, row in enumerate(blob):
+                row_cpy = row
+                for i, coord in enumerate(row_cpy): 
+                    if coord[1] < avg_xmin or coord[1] > avg_xmax: 
+                        continue
+                    if coord[0] < avg_ymin or coord[0] > avg_ymax:
+                        continue
+                    if coord[0] < ymin: ymin = coord[0]
+                    if coord[0] > ymax: ymax = coord[0]
+                    if coord[1] < xmin: xmin = coord[1]
+                    if coord[1] > xmax: xmax = coord[1]
+                    xl = coord[1] * square_size
+                    xr = image_shape[1] - 1 if coord[1] * square_size + square_size > image_shape[1] else coord[1] * square_size + square_size 
+                    yt = coord[0] * square_size
+                    yb = image_shape[0] - 1 if coord[0] * square_size + square_size > image_shape[0] else coord[0] * square_size + square_size 
+                    self.precise_dims.append((xl, xr, yt, yb))
+                blob[y] = row_cpy
+
             xmin *= square_size
             ymin *= square_size
             ymax = image_shape[0] - 1 if ymax * square_size + square_size > image_shape[0] else ymax * square_size + square_size
