@@ -31,7 +31,7 @@ from pstats import SortKey
 # Globals 
 video_writer = None
 global_cap = None
-frame_queue = None 
+frame_queue = None
 image_queue = None
 frame_count = 1
 slice_grid_manager = None
