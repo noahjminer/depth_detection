@@ -424,9 +424,7 @@ class DepthSlicer:
                 if graph.count(neighbor) > 0:
                     graph.remove(neighbor)
                     neighbors = neighbors + self.get_neighbors(neighbor, graph)
-                else: 
-                    continue
-            blobs.append(blob) 
+            blobs.append(blob)
         return blobs
 
     
@@ -466,8 +464,9 @@ class DepthSlicer:
             ymin_max = np.array([[100,0] for i in range(max_cols)])
             for row in blob:
                 for coord in row:
-                    #  if y is less than min 
+                    # if y is less than avg min 
                     if coord[0] < ymin_max[coord[1]][0]: ymin_max[coord[1]][0] = coord[0]
+                    # if y is greater than avg max
                     if coord[0] > ymin_max[coord[1]][1]: ymin_max[coord[1]][1] = coord[0]
             avg_ymin = sum(ymin_max[:, 0]) / len(ymin_max)
             avg_ymax = sum(ymin_max[:, 1]) / len(ymin_max)
