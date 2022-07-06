@@ -28,6 +28,7 @@ def draw_boxes_grid(final_detections, image, draw_dims=False, dims=None, dims_co
             cv2.rectangle(image, (dim[0], dim[2]), (dim[1], dim[3]), dims_color, 3)
     return image
 
+# From AlexeyAB's darknet yolov4
 def non_max_suppression_fast(detections, overlap_thresh):
     if not len(detections):
         return []

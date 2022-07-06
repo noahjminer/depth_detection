@@ -52,7 +52,7 @@ def parse_args():
                     help='path to video, or directory of videos [TBI]')
     parser.add_argument('--prop_thresh', type=float, help='proportion threshold, value between 0.0 and 1.0', default=0.9)
     parser.add_argument('--depth_thresh', type=float, help='depth threshold, between 0.0 and 1.0. 1.0 is closest.', default=0.2)
-    parser.add_argument('--method', type=str, help='Method of image processing', choices=['precise_grid', 'precise'], default='precise')
+    parser.add_argument('--method', type=str, help='Method of image processing', choices=['precise_grid', 'precise', 'mask'], default='precise')
     parser.add_argument('--slice_side_length', type=int, help='length of slice sides', default=800)
     parser.add_argument('--square_size', type=int, help='side length of squares image is split up into in calibration.', default=50)
     parser.add_argument('--grid_width', type=int, help='how many columns in precise grid slices', default=3)
@@ -178,7 +178,7 @@ def precise_grid_video(args, file_name, prop_thresh=0.9, depth_thresh=.2, square
     ret, init_frame = global_cap.read()
 
     if ret: 
-        d = DepthSlicer('precise_grid', cv2.cvtColor(init_frame, cv2.COLOR_BGR2RGB), prop_thresh, depth_thresh, args.slice_side_length, True, 
+        d = DepthSlicer('precise_grid', cv2.cvtColor(init_frame, cv2.COLOR_BGR2RGB), prop_thresh, depth_thresh, args.slice_side_length, regen_dims=False, regen_depth=False, 
                         square_size=square_size, grid_w=args.grid_width, grid_h=args.grid_height, refresh_rate=args.refresh_rate)
         slice_grid_manager = d.dims
     else: 
@@ -239,7 +239,7 @@ def inference(model, image_queue, detections_queue, fps_queue, dims):
         frame = image_queue.get() 
         if frame is None: 
             break 
-        prev_time = time.time() 
+        prev_time = time.time()
 
         images = precise_pre_process(frame, dims)
         with torch.no_grad():
@@ -250,7 +250,7 @@ def inference(model, image_queue, detections_queue, fps_queue, dims):
         fps_queue.put(fps)
         print(f'FPS: {fps}')
     
-def drawing(frame_queue, detections_queue, dims, hw_dims, fps_queue):
+def drawing(frame_queue, detections_queue, slicer, fps_queue):
     global video_writer, global_cap, frame_count
 
     while global_cap.isOpened(): 
@@ -258,45 +258,15 @@ def drawing(frame_queue, detections_queue, dims, hw_dims, fps_queue):
         if frame is None: break
         results = detections_queue.get()
         fps = fps_queue.get()
-        bboxes, scores, labels = precise_post_process(results, hw_dims)
-        image = draw_boxes(bboxes, scores, labels, frame, draw_dims=True, dims=dims, dims_color=(255,0,255))
+        bboxes, scores, labels = slicer.precise_post_process(results)
+        image = draw_boxes(bboxes, scores, labels, frame, draw_dims=True, dims=slicer.dims, dims_color=(255,0,255))
+        image = draw_boxes([], [], [], image, draw_dims=True, dims=slicer.precise_dims, dims_color=(255,255,255))
         frame_count += 1
         write_frame(image)
         if cv2.waitKey(int(fps)) == 27:
             break
     global_cap.release()
     video_writer.release()
-
-def precise_post_process(results, tlhw_dims):
-    cords = []
-    scores = []
-    labels = []
-    for i, result in enumerate(results.xyxyn):
-        # get labels, cords, scores
-        labels.append(result[:, -1])
-        cord_thres = result[:, :4]
-        score = result[:, 4:-1]
-
-        # multiply coordinates to original pixel space (l, t, r, b)
-        cord_thres[:, 0] = cord_thres[:, 0] * tlhw_dims[i, 3] + tlhw_dims[i, 1]
-        cord_thres[:, 2] = cord_thres[:, 2] * tlhw_dims[i, 3] + tlhw_dims[i, 1]
-        cord_thres[:, 1] = cord_thres[:, 1] * tlhw_dims[i, 2] + tlhw_dims[i, 0]
-        cord_thres[:, 3] = cord_thres[:, 3] * tlhw_dims[i, 2] + tlhw_dims[i, 0]
-
-        cords.append(cord_thres)
-        scores.append(score)
-    
-    all_cords = torch.cat(cords)
-    all_labels = torch.cat(labels)
-    all_scores = torch.cat(scores).view(-1)
-
-    nms_mask = torchvision.ops.boxes.batched_nms(all_cords, all_scores, all_labels, iou_threshold=0.7)
-    
-    bboxes = all_cords[nms_mask].cpu().numpy()
-    scores = all_scores[nms_mask].cpu().numpy()
-    labels = all_labels[nms_mask].cpu().numpy()
-    
-    return bboxes, scores, labels
 
 def precise_video(args, file_name, prop_thresh=0.9, depth_thresh=.2, square_size=50, slice_side_length=800):
     global video_writer, global_cap, frame_queue, image_queue, frame_count
@@ -319,20 +289,13 @@ def precise_video(args, file_name, prop_thresh=0.9, depth_thresh=.2, square_size
     video_writer = cv2.VideoWriter(outfile, cv2.VideoWriter_fourcc(*'XVID'), FPS, shape)  
 
     ret, init_frame = global_cap.read()
-
+    method = args.method
     if ret: 
-        d = DepthSlicer('precise', cv2.cvtColor(init_frame, cv2.COLOR_BGR2RGB), prop_thresh, depth_thresh, slice_side_length=slice_side_length, regen=True, square_size=square_size)
+        d = DepthSlicer(method, cv2.cvtColor(init_frame, cv2.COLOR_BGR2RGB), prop_thresh, depth_thresh, slice_side_length=slice_side_length, regen_dims=False, regen_depth=False, square_size=square_size, device=device)
         dims = d.dims
-        tlhw_dims = [] 
-        for dim in dims: 
-            tlhw_dims.append([dim[2], dim[0], dim[3]-dim[2], dim[1]-dim[0]])
-        tlhw_dims.append([0, 0, shape[1], shape[0]])
     else: 
         print('Bad Video')
         exit()
-
-    # turn dims to tensor
-    tlhw_dims = torch.tensor(tlhw_dims, dtype=model_dtype, device=device)
 
     frame_count = 1
     start_time = time.time()
@@ -344,7 +307,7 @@ def precise_video(args, file_name, prop_thresh=0.9, depth_thresh=.2, square_size
 
     capture_thread = Thread(target=video_capture, args=(frame_queue,image_queue))
     inference_thread = Thread(target=inference, args=(model, image_queue, detections_queue, fps_queue, dims))
-    drawing_thread = Thread(target=drawing, args=(frame_queue, detections_queue, dims, tlhw_dims, fps_queue))
+    drawing_thread = Thread(target=drawing, args=(frame_queue, detections_queue, d, fps_queue))
 
     capture_thread.start()
     inference_thread.start()
@@ -391,5 +354,5 @@ if __name__ == "__main__":
    
     if args.method == 'precise_grid': 
         precise_grid_video(args, args.path, args.prop_thresh, args.depth_thresh, args.square_size)
-    else: 
+    else:
         precise_video(args, args.path, args.prop_thresh, args.depth_thresh, args.square_size, args.slice_side_length)

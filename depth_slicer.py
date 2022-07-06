@@ -1,7 +1,10 @@
+from concurrent.futures import process
 from monodepth2.test_simple import create_depth_image_from_frame
 
 from slice_grid_manager import SliceGridManager
 from slice_grid import SliceGrid
+import torchvision
+import torch
 import cv2 
 import numpy as np
 import math
@@ -28,8 +31,8 @@ class DepthSlicer:
             between 0.0 and 1.0, specifies lower bound on distance. 0.0 is farther, and 1.0 is 
             closer  
         """
-    def __init__(self, method, init_frame, proportion_thresh, dist_thresh, slice_side_length=608, regen=True, square_size=100,
-                grid_w=3, grid_h=4, refresh_rate=50): 
+    def __init__(self, method, init_frame, proportion_thresh, dist_thresh, slice_side_length=608, regen_depth=True, regen_dims=False, square_size=100,
+                grid_w=3, grid_h=4, refresh_rate=50, device=None): 
         """
         Sets attributes and generates depth image if regen=True
 
@@ -74,13 +77,26 @@ class DepthSlicer:
         self.grid_w = grid_w 
         self.grid_h = grid_h 
         self.refresh_rate = refresh_rate
-        if regen:
+        self.tlhw_dims = []
+        self.device = device
+        if regen_depth:
             self.generate_depth_image(init_frame)
+
+        if regen_dims:
             self.dims = self.calculate_dims()
-        else: 
+        else:
             self.dims = self.read_slice_file()
+            print(self.dims)
+            if not self.dims: 
+                self.dims = self.calculate_dims()
+            else:
+                tlhw_dims = []
+                for dim in self.dims: 
+                    tlhw_dims.append([dim[2], dim[0], dim[3]-dim[2], dim[1]-dim[0]])
+                tlhw_dims.append([0, 0, self.frame.shape[0], self.frame.shape[1]])
+                self.tlhw_dims = torch.tensor(tlhw_dims, dtype=torch.float16, device=self.device)
+                
         
-    
     def generate_depth_image(self, frame) -> None:
         """
         Generates depth image from supplied frame
@@ -104,6 +120,9 @@ class DepthSlicer:
         Parameters:
         None
         """
+        if not os.path.exists('frame_disp.jpeg'): 
+            self.generate_depth_image(self.frame)
+
         prev_time = time.time()
         if self.method == 'simple':
             dims = self.calculate_simple_dims()
@@ -111,14 +130,16 @@ class DepthSlicer:
             dims = self.calculate_precise_dims()
         elif self.method == 'precise_grid':
             dims = self.calculate_precise_grid_dims()
+        else: 
+            dims = self.calculate_mask_dims()
         print('---------')
         print(f'Dimension calculation done in {time.time() - prev_time}')
         print('---------')
-        # self.write_slice_file(dims)
+        self.write_slice_file(dims)
         return dims
 
     
-    def create_depth_mask(self, image, dim) -> bool:
+    def create_depth_mask(self, image, dim, masked=False) -> bool:
         """
         Loops through pixels within dimension in image, checking color values with thresholds
 
@@ -133,90 +154,41 @@ class DepthSlicer:
         for i in range(dim[2], dim[3]):
             for j in range(dim[0], dim[1]):
                 dist = image[i][j][0] * 0.0039
-                if dist < self.dist_thresh:
+                if not masked and dist < self.dist_thresh:
+                    count += 1
+                elif masked and dist > 0:
                     count += 1
         count = count / ((dim[3] - dim[2]) * (dim[1] - dim[0]))
         if count > self.proportion_thresh:
             return True
         return False
-    
 
-    def calculate_simple_dims(self) -> list:
-        """
-        Calculates "simple" method dimensions. Loops through every dimension to check for valid slices. Slice side length has biggest effect on outcome
 
-        ...
+    def calculate_mask_dims(self):
+        depth_img = cv2.imread(self.path, 0)
+        _, mask = cv2.threshold(depth_img, thresh=50, maxval=30, type=cv2.THRESH_BINARY_INV)
+        mask3 = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)  # 3 channel mask
+        masked_frame = cv2.bitwise_and(self.frame, self.frame, mask=mask)
+        cv2.imwrite('masked_frame.jpg', masked_frame)
 
-        Parameters: 
-        None
-        """
-        image = cv2.imread(self.path, cv2.IMREAD_COLOR)
+        # find local minimums of slices
+        graph, image_shape = self.generate_depth_graph_from_mask(mask3, self.square_size)
 
-        shape = image.shape
-        height = int(shape[0])
-        width = int(shape[1])
+        blobs = np.asarray(self.connect_squares_into_islands(graph), dtype=object)
+                
+        # Process connected blobs into one box
+        dims = self.create_bounding_box_for_islands_mask(blobs, image_shape, self.square_size)
+        
+        processed_dims, _, _ = self.divide_island_boxes(blobs, dims, image_shape, self.slice_side_length)
 
-        # 608 is what darknet compresses images to
-        num_slice_x = math.floor(width / self.slice_side_length)
-        num_slice_y = math.floor(height / self.slice_side_length)
+        tlhw_dims = []
+        for dim in processed_dims: 
+            tlhw_dims.append([dim[2], dim[0], dim[3]-dim[2], dim[1]-dim[0]])
+        tlhw_dims .append([0, 0, self.frame.shape[0], self.frame.shape[1]])
 
-        slice_dim_x = math.ceil(width / num_slice_x)
-        slice_dim_y = math.ceil(height / num_slice_y)
-
-        no_comp_dims = []
-        expand_amount = 0.05 * self.slice_side_length
-        half_expand_amount = math.floor(expand_amount * .5)
-        for x in range(1, num_slice_x + 1):
-            for y in range(1, num_slice_y + 1):
-                left = (x - 1) * slice_dim_x
-                right = x * slice_dim_x
-                top = (y - 1) * slice_dim_y
-                bottom = y * slice_dim_y
-                if bottom >= height:
-                    bottom = height - 1
-                    top = bottom - slice_dim_y
-                if right >= width:
-                    right = width - 1
-                    left = right - slice_dim_x
-                if top < 0:
-                    top = 0
-                if left < 0:
-                    left = 0
-                dim = [left, right, top, bottom]
-                if self.create_depth_mask(image, dim):
-                    no_comp_dims.append(dim)
-
-        expand_amount = int(2 * half_expand_amount)
-
-        # Bounds checking
-        if len(no_comp_dims) > 1:
-            for index, dim in enumerate(no_comp_dims):
-                if dim[0] == 0:
-                    dim[1] += expand_amount
-                elif dim[1] >= width - 1:
-                    dim[0] -= expand_amount
-                else:
-                    dim[0] -= half_expand_amount
-                    dim[1] += half_expand_amount
-
-                if dim[2] == 0:
-                    dim[3] += expand_amount
-                elif dim[3] >= height - 1:
-                    dim[2] -= expand_amount
-                else:
-                    dim[2] -= half_expand_amount
-                    dim[3] += half_expand_amount
-
-                if dim[0] < 0:
-                    dim[0] = 0
-                if dim[1] >= width:
-                    dim[1] = width-1
-                if dim[2] < 0:
-                    dim[2] = 0
-                if dim[3] >= height:
-                    dim[3] = height-1
-        return no_comp_dims  
-    
+        self.tlhw_dims = torch.tensor(tlhw_dims, dtype=torch.float16, device=self.device)
+        # Process dims by splitting up bigger boxes 
+        return processed_dims
 
     def calculate_precise_dims(self):
         """
@@ -228,11 +200,9 @@ class DepthSlicer:
         None
         """
         graph, image_shape = self.generate_depth_graph(0, self.square_size)
-
         # Connect islands into one list
         blobs = self.connect_squares_into_islands(graph)
-
-        sorted_blobs = [sorted(blob, key=lambda tup: tup[0]) for blob in blobs]
+        sorted_blobs = [sorted(blob, key=lambda coord: coord[0]) for blob in blobs]
         blobs_2d = []
         for blob in sorted_blobs:
             blobs_rows = []
@@ -253,11 +223,17 @@ class DepthSlicer:
         # Process connected blobs into one box
         dims = self.create_bounding_box_for_islands(blobs_2d, image_shape, self.square_size)
 
-        processed_dims, _, _ = self.divide_island_boxes(dims, image_shape, self.slice_side_length)
+        processed_dims, _, _ = self.divide_island_boxes(blobs, dims, image_shape, self.slice_side_length)
+
+        tlhw_dims = []
+        for dim in processed_dims: 
+            tlhw_dims.append([dim[2], dim[0], dim[3]-dim[2], dim[1]-dim[0]])
+        tlhw_dims.append([0, 0, self.frame.shape[0], self.frame.shape[1]])
+
+        self.tlhw_dims = torch.tensor(tlhw_dims, dtype=torch.float16, device=self.device)
         
         # Process dims by splitting up bigger boxes 
         return processed_dims
-
 
     def calculate_precise_grid_dims(self): 
         """
@@ -296,8 +272,65 @@ class DepthSlicer:
         
         return slice_manager
 
+    def precise_post_process(self, results):
+        cords = []
+        scores = []
+        labels = []
+        for i, result in enumerate(results.xyxyn):
+            # get labels, cords, scores
+            labels.append(result[:, -1])
+            cord_thres = result[:, :4]
+            score = result[:, 4:-1]
 
-    def divide_island_boxes(self, dims, image_shape, lower_bound=800) -> list: 
+            # multiply coordinates to original pixel space (l, t, r, b)
+            cord_thres[:, 0] = cord_thres[:, 0] * self.tlhw_dims[i, 3] + self.tlhw_dims[i, 1]
+            cord_thres[:, 2] = cord_thres[:, 2] * self.tlhw_dims[i, 3] + self.tlhw_dims[i, 1]
+            cord_thres[:, 1] = cord_thres[:, 1] * self.tlhw_dims[i, 2] + self.tlhw_dims[i, 0]
+            cord_thres[:, 3] = cord_thres[:, 3] * self.tlhw_dims[i, 2] + self.tlhw_dims[i, 0]
+
+            cords.append(cord_thres)
+            scores.append(score)
+        
+        all_cords = torch.cat(cords)
+        all_labels = torch.cat(labels)
+        all_scores = torch.cat(scores).view(-1)
+
+        #score_mask = all_scores > .2
+
+        nms_mask = torchvision.ops.boxes.batched_nms(all_cords, all_scores, all_labels, iou_threshold=.5)
+        # nms_mask = torchvision.ops.boxes.batched_nms(all_cords[score_mask], all_scores[score_mask], all_labels[score_mask], iou_threshold=.5)
+        
+        bboxes = all_cords[nms_mask]
+        scores = all_scores[nms_mask]
+        labels = all_labels[nms_mask]
+
+        # Find overlap from big image and overwrite boxes underneath
+        now = time.time()
+        overlap_mask = self.intersect_suppression(bboxes)
+        print(f'took {time.time() - now}')
+
+        return bboxes[overlap_mask].cpu().numpy(), scores[overlap_mask].cpu().numpy(), labels[overlap_mask].cpu().numpy()
+
+    def intersect_suppression(self, coords):     
+        x1 = coords[:, 0]
+        y1 = coords[:, 1]
+        x2 = coords[:, 2]
+        y2 = coords[:, 3]
+        areas = torch.mul(x2 - x1, y2 - y1)
+        area_idxs = torch.argsort(areas, dim=0, descending=False)
+        iarea_mask = area_idxs > 0
+
+        for i, idx in enumerate(area_idxs):
+            xx1 = torch.maximum(x1[idx], x1[area_idxs[i+1:]])
+            yy1 = torch.maximum(y1[idx], y1[area_idxs[i+1:]])
+            xx2 = torch.minimum(x2[idx], x2[area_idxs[i+1:]])
+            yy2 = torch.minimum(y2[idx], y2[area_idxs[i+1:]])
+            iarea = torch.mul(xx2 - xx1, yy2 - yy1)
+            iarea_mask[i] = not torch.any(torch.abs(iarea - areas[idx]) < 300)
+        
+        return area_idxs[iarea_mask]
+
+    def divide_island_boxes(self, blobs, dims, image_shape, lower_bound=800) -> list:
         """
         Divides larger bounding boxes into smaller divisions, depending on lower_bound. 
 
@@ -317,25 +350,27 @@ class DepthSlicer:
         processed_dims = [] 
         max_w = 0
         max_h = 0
+        xlower = lower_bound 
+        ylower = lower_bound + (.2 * lower_bound)
         for index, dim in enumerate(dims): 
             w = dim[1] - dim[0]
             h = dim[3] - dim[2]
 
-            # if only one is less then just add it in 
-            if w < lower_bound and h < lower_bound:
+            # if both are less then just add it in 
+            if w < xlower and h < lower_bound:
                 processed_dims.append(dim)
                 continue
     
             # want each stack to be ~800-1200 px 
-            horiz_segments = int(math.floor(w / lower_bound))
+            horiz_segments = int(math.floor(w / xlower))
             vert_segments = int(math.floor(h / lower_bound)) 
             if not horiz_segments: horiz_segments += 1
             if not vert_segments: vert_segments += 1
-            horiz_remainder = w % lower_bound
-            vert_remainder = h % lower_bound
+            horiz_remainder = w % xlower
+            vert_remainder = h % ylower
 
-            segment_width = lower_bound + horiz_remainder / horiz_segments if horiz_segments > 1 else w
-            segment_height = lower_bound + vert_remainder / vert_segments if vert_segments > 1 else h
+            segment_width = xlower + horiz_remainder / horiz_segments if horiz_segments > 1 else w
+            segment_height = ylower + vert_remainder / vert_segments if vert_segments > 1 else h
 
             woverlap = 0.1 * segment_width # NEEDS PARAMATERIZATION
             hoverlap = 0.1 * segment_height
@@ -350,30 +385,61 @@ class DepthSlicer:
                     new_dim[1] = dim[0] + (i-1) * segment_width + segment_width
                     new_dim[2] = dim[2] + (j-1) * segment_height
                     new_dim[3] = dim[2] + (j-1) * segment_height + segment_height
-                    # check if both are good, then add half of overlap 
-                    if new_dim[0] - woverlap > 0 and new_dim[1] + woverlap < image_shape[1] - 1:
-                        new_dim[0] = new_dim[0] - woverlap
-                        new_dim[1] = new_dim[1] + woverlap
-                    elif new_dim[1] + 2 * woverlap < image_shape[1] - 1: 
-                        new_dim[0] = 0
-                        new_dim[1] = new_dim[1] + 2 * woverlap
-                    elif new_dim[0] - 2 * woverlap > 0: 
-                        new_dim[1] = image_shape[1] - 0
-                        new_dim[0] = new_dim[0] - 2 * woverlap
 
-                    if new_dim[2] - hoverlap > 0 and new_dim[3] + hoverlap < image_shape[0] - 1:
-                        new_dim[2] = new_dim[2] - hoverlap
-                        new_dim[3] = new_dim[3] + hoverlap
-                    elif new_dim[3] + 2 * hoverlap < image_shape[0] - 1: 
-                        new_dim[2] = 0
-                        new_dim[3] = new_dim[3] + 2 * hoverlap
-                    elif new_dim[2] - 2 * hoverlap > 0: 
-                        new_dim[3] = image_shape[0] - 0
-                        new_dim[2] = new_dim[2] - 2 * hoverlap
+                    local_mask_x = np.ma.getmask(np.ma.masked_inside(blobs[index][:, 1], new_dim[0] // self.square_size, new_dim[1] // self.square_size))
+                    local_mask_y = np.ma.getmask(np.ma.masked_inside(blobs[index][:, 0], new_dim[2] // self.square_size, new_dim[3] // self.square_size))
+                    local_mask = np.logical_and(local_mask_x, local_mask_y)
+
+                    masked_blob = blobs[index][local_mask]
+                    mins = np.amin(masked_blob, axis=0) * self.square_size
+                    maxs = np.amax(masked_blob, axis=0) * self.square_size
+
+                    if new_dim[0] < mins[1]: new_dim[0] = mins[1] 
+                    if new_dim[1] > maxs[1]: new_dim[1] = maxs[1] 
+                    if new_dim[2] < mins[0]: new_dim[2] = mins[0] 
+                    if new_dim[3] > maxs[0]: new_dim[3] = maxs[0]
+
+                    dim_w = new_dim[1] - new_dim[0]
+                    dim_h = new_dim[3] - new_dim[2]
+
+                    # check if both are good, then add half of overlap 
+                    if horiz_segments > 1 or dim_w < self.slice_side_length:
+                        # Change overlap to match side length instead
+                        if dim_w < self.slice_side_length: woverlap = .5 * (self.slice_side_length - dim_w)
+
+                        if new_dim[0] - woverlap > 0 and new_dim[1] + woverlap < image_shape[1] - 1:
+                            new_dim[0] = new_dim[0] - woverlap
+                            new_dim[1] = new_dim[1] + woverlap
+                        elif new_dim[1] + 2 * woverlap < image_shape[1] - 1: 
+                            new_dim[0] = 0
+                            new_dim[1] = new_dim[1] + 2 * woverlap
+                        elif new_dim[0] - 2 * woverlap > 0: 
+                            new_dim[1] = image_shape[1] - 0
+                            new_dim[0] = new_dim[0] - 2 * woverlap
+                    
+
+                    if vert_segments > 1 or dim_h < self.slice_side_length:
+                        if dim_h < self.slice_side_length: hoverlap = .5 * (self.slice_side_length - dim_h)
+
+                        if new_dim[2] - hoverlap > 0 and new_dim[3] + hoverlap < image_shape[0] - 1:
+                            new_dim[2] = new_dim[2] - hoverlap
+                            new_dim[3] = new_dim[3] + hoverlap
+                        elif new_dim[3] + 2 * hoverlap < image_shape[0] - 1: 
+                            new_dim[2] = 0
+                            new_dim[3] = new_dim[3] + 2 * hoverlap
+                        elif new_dim[2] - 2 * hoverlap > 0: 
+                            new_dim[3] = image_shape[0] - 0
+                            new_dim[2] = new_dim[2] - 2 * hoverlap
+
                     new_dim = [int(math.floor(num)) for num in new_dim]
+
+                    # check local min / max 
+                    # want to get coords > min and less than max
+
                     new_dim.append(index)
                     processed_dims.append(new_dim)
         return processed_dims, max_w, max_h
+
 
     def generate_depth_graph(self, lower_bound, square_size): 
         """
@@ -399,7 +465,20 @@ class DepthSlicer:
                 xmax = image_shape[1] - 1 if x + square_size > image_shape[1] else x + square_size 
                 # depth mask
                 if self.create_depth_mask(image, [x, xmax, y, ymax]): 
-                    graph.append((int(math.floor(y/square_size)), int(math.floor(x/square_size))))
+                    graph.append((y // square_size, x // square_size))
+        return graph, image_shape
+    
+
+    def generate_depth_graph_from_mask(self, image, square_size):
+        image_shape = image.shape
+        graph = []
+        for y in range(0, image_shape[0], square_size):
+            ymax = image_shape[0] - 1 if y + square_size > image_shape[0] else y + square_size
+            for x in range(0, image_shape[1], square_size):
+                xmax = image_shape[1] - 1 if x + square_size > image_shape[1] else x + square_size 
+                # depth mask
+                if self.create_depth_mask(image, [x, xmax, y, ymax], True): 
+                    graph.append((y // square_size, x // square_size))
         return graph, image_shape
 
 
@@ -450,34 +529,9 @@ class DepthSlicer:
             xmax = 0
             ymax = 0
 
-            avg_xmax = 0
-            avg_xmin = 0
-            max_cols = 0
-            for row in blob:
-                if len(row) <= 1: continue
-                if len(row) > max_cols: max_cols = len(row)
-                avg_xmax += row[-1][1]
-                avg_xmin += row[0][1]
-            avg_xmax /= len(blob)
-            avg_xmin /= len(blob)
-
-            ymin_max = np.array([[100,0] for i in range(max_cols)])
-            for row in blob:
-                for coord in row:
-                    # if y is less than avg min 
-                    if coord[0] < ymin_max[coord[1]][0]: ymin_max[coord[1]][0] = coord[0]
-                    # if y is greater than avg max
-                    if coord[0] > ymin_max[coord[1]][1]: ymin_max[coord[1]][1] = coord[0]
-            avg_ymin = sum(ymin_max[:, 0]) / len(ymin_max)
-            avg_ymax = sum(ymin_max[:, 1]) / len(ymin_max)
-
             for y, row in enumerate(blob):
                 row_cpy = row
                 for i, coord in enumerate(row_cpy): 
-                    if coord[1] < avg_xmin or coord[1] > avg_xmax: 
-                        continue
-                    if coord[0] < avg_ymin or coord[0] > avg_ymax:
-                        continue
                     if coord[0] < ymin: ymin = coord[0]
                     if coord[0] > ymax: ymax = coord[0]
                     if coord[1] < xmin: xmin = coord[1]
@@ -493,6 +547,40 @@ class DepthSlicer:
             ymin *= square_size
             ymax = image_shape[0] - 1 if ymax * square_size + square_size > image_shape[0] else ymax * square_size + square_size
             xmax = image_shape[1] - 1 if xmax * square_size + square_size > image_shape[1] else xmax * square_size + square_size 
+            dims.append((xmin, xmax, ymin, ymax)) 
+        return dims
+
+
+    def create_bounding_box_for_islands_mask(self, blobs, image_shape, square_size) -> list:
+        """
+        Creates a bounding box that encompasses each blob in blobs by finding the max and min of each blob's x and y
+
+        ... 
+
+        Parameters: 
+        -----------
+        blobs : list of lists of graph coordinates [y, x]
+            Each blob in blobs is an island to be connected
+        image_shape : tuple (height, width)
+            The shape of the video / image. Used for bounds checking
+        square_size : int 
+            Length of square side. Multiplied by grid coordinate values to get pixel coordinates
+        """
+        dims = []
+        for blob in blobs: 
+            mins = np.amin(blob, axis=0)
+            maxs = np.amax(blob, axis=0)
+
+            xmin = mins[1]
+            xmax = maxs[1]
+            ymin = mins[0]
+            ymax = maxs[0]
+
+            xmin *= square_size
+            ymin *= square_size
+            ymax = max(0, min(ymax * square_size + square_size, image_shape[0] - 1))
+            xmax = max(0, min(xmax * square_size + square_size, image_shape[1] - 1))
+    
             dims.append((xmin, xmax, ymin, ymax)) 
         return dims
 
@@ -565,6 +653,7 @@ class DepthSlicer:
                     neighbors.append((y + yn, x + xn)) 
         return neighbors
 
+
     def write_slice_file(self, dims) -> None:
         """
         Writes slice file to base directory. 
@@ -591,10 +680,15 @@ class DepthSlicer:
         None
         """
         dims = []
-        with open(os.path.join(os.getcwd(), 'dims.txt'), 'r') as infile:
-            content = infile.readlines()
-            for line in content:
-                nums = [int(n) for n in line.split(' ')]
-                dims.append(nums)
+        try:
+            print('reading slice file...')
+            with open(os.path.join(os.getcwd(), 'dims.txt'), 'r') as infile:
+                content = infile.readlines()
+                for line in content:
+                    nums = [int(n) for n in line.split(' ')]
+                    dims.append(nums)
+        except Exception as e: 
+            print(f'slice file reading failed, {e}...')
+            return False
         return dims
 
