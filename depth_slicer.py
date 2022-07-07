@@ -139,7 +139,7 @@ class DepthSlicer:
         return dims
 
     
-    def create_depth_mask(self, image, dim, masked=False) -> bool:
+    def create_depth_mask(self, image, dim, step=1, masked=False) -> bool:
         """
         Loops through pixels within dimension in image, checking color values with thresholds
 
@@ -149,19 +149,36 @@ class DepthSlicer:
             Depth map generated on init
         dim : list of ints
             Dimension (xmin, xmax, ymin, ymax)
+        masked : boolean
+            True of using mask method
+        step : int 
+            How many pixels are between each pixel checked. Lowers calculation time
         """
-        count = 0
-        for i in range(dim[2], dim[3]):
-            for j in range(dim[0], dim[1]):
-                dist = image[i][j][0] * 0.0039
-                if not masked and dist < self.dist_thresh:
-                    count += 1
-                elif masked and dist > 0:
-                    count += 1
-        count = count / ((dim[3] - dim[2]) * (dim[1] - dim[0]))
-        if count > self.proportion_thresh:
-            return True
-        return False
+        # NEED TO CHANGE THIS 
+        if not masked:
+            count = 0
+            for i in range(dim[2], dim[3], step):
+                for j in range(dim[0], dim[1], step):
+                    dist = image[i][j][0] * 0.0039
+                    if not masked and dist < self.dist_thresh:
+                        count += 1
+                    elif masked and dist > 0:
+                        count += 1
+            count = count / ((dim[3] - dim[2]) * (dim[1] - dim[0]) / step**2)
+            if count > self.proportion_thresh:
+                return True
+            return False
+        else:
+            count = 0
+            for i in range(dim[2], dim[3], step):
+                for j in range(dim[0], dim[1], step):
+                    dist = image[i][j][0] * 0.0039
+                    if dist > 0:
+                        count += 1
+            count = count / ((dim[3] - dim[2]) * (dim[1] - dim[0]) / step**2)
+            if count > self.proportion_thresh:
+                return True
+            return False
 
 
     def calculate_mask_dims(self):
@@ -272,61 +289,108 @@ class DepthSlicer:
         
         return slice_manager
 
-    def precise_post_process(self, results):
-        cords = []
+    def precise_post_process(self, results) -> torch.Tensor:
+        """
+        Post processing for precise method. Corrects bounding box coordinates, and performs non max / intercept suppression
+
+        Returns numpy arrays of bboxes, labels, and scores
+        ...
+
+        Parameters:
+        -----------
+        results : tensor
+            Results directly from Yolov5
+        """
+        coords = []
         scores = []
         labels = []
+        
+        limit = len(results.xyxyn) - 1
         for i, result in enumerate(results.xyxyn):
             # get labels, cords, scores
-            labels.append(result[:, -1])
-            cord_thres = result[:, :4]
-            score = result[:, 4:-1]
+            label = result[:, -1]
+            coord_thres = result[:, :4]
+            score = result[:, 4:-1].view(-1)
+            
+            if i < limit:
+                lower_mask = coord_thres[:, 3] < .99
+                label = label[lower_mask]
+                coord_thres = coord_thres[lower_mask]
+                score = score[lower_mask]
 
             # multiply coordinates to original pixel space (l, t, r, b)
-            cord_thres[:, 0] = cord_thres[:, 0] * self.tlhw_dims[i, 3] + self.tlhw_dims[i, 1]
-            cord_thres[:, 2] = cord_thres[:, 2] * self.tlhw_dims[i, 3] + self.tlhw_dims[i, 1]
-            cord_thres[:, 1] = cord_thres[:, 1] * self.tlhw_dims[i, 2] + self.tlhw_dims[i, 0]
-            cord_thres[:, 3] = cord_thres[:, 3] * self.tlhw_dims[i, 2] + self.tlhw_dims[i, 0]
+            coord_thres[:, 0] = coord_thres[:, 0] * self.tlhw_dims[i, 3] + self.tlhw_dims[i, 1]
+            coord_thres[:, 2] = coord_thres[:, 2] * self.tlhw_dims[i, 3] + self.tlhw_dims[i, 1]
+            coord_thres[:, 1] = coord_thres[:, 1] * self.tlhw_dims[i, 2] + self.tlhw_dims[i, 0]
+            coord_thres[:, 3] = coord_thres[:, 3] * self.tlhw_dims[i, 2] + self.tlhw_dims[i, 0]
 
-            cords.append(cord_thres)
+            labels.append(label)
+            coords.append(coord_thres)
             scores.append(score)
-        
-        all_cords = torch.cat(cords)
-        all_labels = torch.cat(labels)
-        all_scores = torch.cat(scores).view(-1)
 
         #score_mask = all_scores > .2
-
-        nms_mask = torchvision.ops.boxes.batched_nms(all_cords, all_scores, all_labels, iou_threshold=.5)
-        # nms_mask = torchvision.ops.boxes.batched_nms(all_cords[score_mask], all_scores[score_mask], all_labels[score_mask], iou_threshold=.5)
         
-        bboxes = all_cords[nms_mask]
-        scores = all_scores[nms_mask]
-        labels = all_labels[nms_mask]
+        for i in range(len(coords)):
+            nms_mask = torchvision.ops.boxes.batched_nms(coords[i], scores[i], labels[i], iou_threshold=.4)
+            coords[i] = coords[i][nms_mask]
+            scores[i] = scores[i][nms_mask]
+            labels[i] = labels[i][nms_mask]
+        
+        # intersect suppress from slice -> main image
+        for i in range(len(coords) - 1):
+            is_mask = self.intersect_suppression(coords[i], coords[-1])
+            coords[i] = coords[i][is_mask]
+            scores[i] = scores[i][is_mask]
+            labels[i] = labels[i][is_mask]
 
-        # Find overlap from big image and overwrite boxes underneath
-        now = time.time()
-        overlap_mask = self.intersect_suppression(bboxes)
-        print(f'took {time.time() - now}')
+        bboxes = torch.cat(coords)
+        scores = torch.cat(scores).view(-1)
+        labels = torch.cat(labels)
 
-        return bboxes[overlap_mask].cpu().numpy(), scores[overlap_mask].cpu().numpy(), labels[overlap_mask].cpu().numpy()
+        nms_mask = torchvision.ops.boxes.batched_nms(bboxes, scores, labels, iou_threshold=.5)
 
-    def intersect_suppression(self, coords):     
-        x1 = coords[:, 0]
-        y1 = coords[:, 1]
-        x2 = coords[:, 2]
-        y2 = coords[:, 3]
-        areas = torch.mul(x2 - x1, y2 - y1)
+        return bboxes[nms_mask].cpu().numpy(), scores[nms_mask].cpu().numpy(), labels[nms_mask].cpu().numpy()
+    
+    def intersect_suppression(self, scoords, mcoords, limit=.5) -> torch.Tensor: 
+        """
+        Removes bounding boxes almost fully enclosed inside larger bounding boxes. Important for the borders of the 
+        slices. 
+
+        Returns tensor of indexes to mask scoords
+
+        ...
+
+        Parameters: 
+        -----------
+        scoords : tensor
+            bounding box coordinates (l, t, r, b) from a slice (in original frame scale)
+        mcoords : tensor
+            bounding box coordinates from entire frame
+        limit : float
+            hyperparameter for how much of box must be encapsulated
+        """   
+        sx1 = scoords[:, 0]
+        sy1 = scoords[:, 1]
+        sx2 = scoords[:, 2]
+        sy2 = scoords[:, 3]
+
+        mx1 = mcoords[:, 0]
+        my1 = mcoords[:, 1]
+        mx2 = mcoords[:, 2]
+        my2 = mcoords[:, 3]
+
+        areas = torch.mul(sx2 - sx1, sy2 - sy1)
         area_idxs = torch.argsort(areas, dim=0, descending=False)
         iarea_mask = area_idxs > 0
 
         for i, idx in enumerate(area_idxs):
-            xx1 = torch.maximum(x1[idx], x1[area_idxs[i+1:]])
-            yy1 = torch.maximum(y1[idx], y1[area_idxs[i+1:]])
-            xx2 = torch.minimum(x2[idx], x2[area_idxs[i+1:]])
-            yy2 = torch.minimum(y2[idx], y2[area_idxs[i+1:]])
+            ratio = limit * areas[idx]
+            xx1 = torch.maximum(sx1[idx], mx1)
+            yy1 = torch.maximum(sy1[idx], my1)
+            xx2 = torch.minimum(sx2[idx], mx2)
+            yy2 = torch.minimum(sy2[idx], my2)
             iarea = torch.mul(xx2 - xx1, yy2 - yy1)
-            iarea_mask[i] = not torch.any(torch.abs(iarea - areas[idx]) < 300)
+            iarea_mask[i] = not torch.any(torch.abs(iarea - areas[idx]) < ratio)
         
         return area_idxs[iarea_mask]
 
@@ -470,6 +534,18 @@ class DepthSlicer:
     
 
     def generate_depth_graph_from_mask(self, image, square_size):
+        """
+        Generates a depth graph from a mask, similar to create_depth_mask, but goes off pixel values > 0
+
+        ...
+
+        Parameters:
+        -----------
+        image : cv2 image object
+            init_frame with mask applied
+        square_size : int
+            size of squares image will be divided into
+        """
         image_shape = image.shape
         graph = []
         for y in range(0, image_shape[0], square_size):
@@ -477,7 +553,7 @@ class DepthSlicer:
             for x in range(0, image_shape[1], square_size):
                 xmax = image_shape[1] - 1 if x + square_size > image_shape[1] else x + square_size 
                 # depth mask
-                if self.create_depth_mask(image, [x, xmax, y, ymax], True): 
+                if self.create_depth_mask(image, [x, xmax, y, ymax], step=10, masked=True): 
                     graph.append((y // square_size, x // square_size))
         return graph, image_shape
 
