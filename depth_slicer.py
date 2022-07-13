@@ -86,7 +86,6 @@ class DepthSlicer:
             self.dims = self.calculate_dims()
         else:
             self.dims = self.read_slice_file()
-            print(self.dims)
             if not self.dims: 
                 self.dims = self.calculate_dims()
             else:
@@ -312,11 +311,11 @@ class DepthSlicer:
             coord_thres = result[:, :4]
             score = result[:, 4:-1].view(-1)
             
-            if i < limit:
-                lower_mask = coord_thres[:, 3] < .99
-                label = label[lower_mask]
-                coord_thres = coord_thres[lower_mask]
-                score = score[lower_mask]
+            # if i < limit:
+            #     lower_mask = coord_thres[:, 3] < .99
+            #     label = label[lower_mask]
+            #     coord_thres = coord_thres[lower_mask]
+            #     score = score[lower_mask]
 
             # multiply coordinates to original pixel space (l, t, r, b)
             coord_thres[:, 0] = coord_thres[:, 0] * self.tlhw_dims[i, 3] + self.tlhw_dims[i, 1]
@@ -329,27 +328,46 @@ class DepthSlicer:
             scores.append(score)
 
         #score_mask = all_scores > .2
-        
-        for i in range(len(coords)):
-            nms_mask = torchvision.ops.boxes.batched_nms(coords[i], scores[i], labels[i], iou_threshold=.4)
-            coords[i] = coords[i][nms_mask]
-            scores[i] = scores[i][nms_mask]
-            labels[i] = labels[i][nms_mask]
+        # prev = time.time()
+        # for i in range(len(coords)):
+        #     nms_mask = torchvision.ops.boxes.batched_nms(coords[i], scores[i], labels[i], iou_threshold=.4)
+        #     coords[i] = coords[i][nms_mask]
+        #     scores[i] = scores[i][nms_mask]
+        #     labels[i] = labels[i][nms_mask]
+        # print(f'nms took: {time.time() - prev}')
         
         # intersect suppress from slice -> main image
-        for i in range(len(coords) - 1):
-            is_mask = self.intersect_suppression(coords[i], coords[-1])
-            coords[i] = coords[i][is_mask]
-            scores[i] = scores[i][is_mask]
-            labels[i] = labels[i][is_mask]
+       
+        bboxes = torch.cat(coords[0:-1])
+        final_scores = torch.cat(scores[0:-1])
+        final_labels = torch.cat(labels[0:-1])
+        is_mask = self.intersect_suppression_dummy(bboxes, coords[-1])
+        bboxes = bboxes[is_mask]
+        final_scores = final_scores[is_mask]
+        final_labels = final_labels[is_mask]
 
-        bboxes = torch.cat(coords)
-        scores = torch.cat(scores).view(-1)
-        labels = torch.cat(labels)
+        bboxes = torch.cat([bboxes, coords[-1]])
+        scores = torch.cat([final_scores, scores[-1]]).view(-1)
+        labels = torch.cat([final_labels, labels[-1]])
 
         nms_mask = torchvision.ops.boxes.batched_nms(bboxes, scores, labels, iou_threshold=.5)
+        bboxes = bboxes[nms_mask]
+        scores = scores[nms_mask]
+        labels = labels[nms_mask]
 
-        return bboxes[nms_mask].cpu().numpy(), scores[nms_mask].cpu().numpy(), labels[nms_mask].cpu().numpy()
+        # return bboxes[nms_mask].cpu().numpy(), scores[nms_mask].cpu().numpy(), labels[nms_mask].cpu().numpy()
+        return bboxes.cpu().numpy(), scores.cpu().numpy(), labels.cpu().numpy()
+    
+    def intersect_suppression_dummy(self, coords, mcoords):
+        is_mask = coords[:, 0] > -1
+        halfx = torch.div(coords[:, 2] - coords[:, 0], 2)
+        halfy = torch.div(coords[:, 3] - coords[:, 1], 2)
+        midpx = halfx + coords[:, 0]
+        midpy = halfy + coords[:, 1]
+        for i, coord in enumerate(coords):
+            is_mask[i] = (~torch.any((midpx[i] > mcoords[:, 0]) & (midpy[i] > mcoords[:, 1]) & (midpx[i] < mcoords[:, 2]) & (midpy[i] < mcoords[:, 3])))
+
+        return is_mask
     
     def intersect_suppression(self, scoords, mcoords, limit=.5) -> torch.Tensor: 
         """
@@ -391,8 +409,80 @@ class DepthSlicer:
             yy2 = torch.minimum(sy2[idx], my2)
             iarea = torch.mul(xx2 - xx1, yy2 - yy1)
             iarea_mask[i] = not torch.any(torch.abs(iarea - areas[idx]) < ratio)
-        
+
         return area_idxs[iarea_mask]
+    
+    def intersect_suppression_heap(self, scoords, mcoords, limit=.5, div=500) -> torch.Tensor: 
+        """
+        Removes bounding boxes almost fully enclosed inside larger bounding boxes. Important for the borders of the 
+        slices. 
+
+        Returns tensor of indexes to mask scoords
+
+        ...
+
+        Parameters: 
+        -----------
+        scoords : tensor
+            bounding box coordinates (l, t, r, b) from a slice (in original frame scale)
+        mcoords : tensor
+            bounding box coordinates from entire frame
+        limit : float
+            hyperparameter for how much of box must be encapsulated
+        """   
+        sx1 = scoords[:, 0]
+        sy1 = scoords[:, 1]
+        sx2 = scoords[:, 2]
+        sy2 = scoords[:, 3]
+
+        mx1 = mcoords[:, 0]
+        my1 = mcoords[:, 1]
+        mx2 = mcoords[:, 2]
+        my2 = mcoords[:, 3]
+
+        idxs = torch.argsort(sy2, dim=0)
+
+        areas = torch.mul(sx2 - sx1, sy2 - sy1)
+        area_idxs = torch.argsort(areas, dim=0, descending=False)
+        iarea_mask = area_idxs > 0
+
+        prev = time.time()
+        mdist = torch.min(torch.abs(mx1[0] - sx1[:] + my1[0] - sy1[0]))
+        print(f'dist took {time.time() - prev}')
+
+        denom = 1 / div
+
+        # # mmidp = torch.div((mcoords[:, 2] - mcoords[:, 0]) * .5 + mcoords[:, 0], div, rounding_mode='floor')
+        # # smidp = torch.div((scoords[:, 2] - scoords[:, 0]) * .5 + scoords[:, 0], div, rounding_mode='floor')
+
+        # mmidp = torch.round(((mcoords[:, 2] - mcoords[:, 0]) * .5 + mcoords[:, 0]) * denom)
+        # smidp = torch.round(((sx2 - sx1) * .5 + sx1) * denom)
+        # mmidp = mmidp.to(torch.uint8)
+        # smidp = smidp.to(torch.uint8)
+
+        # left off cause smidpx and mmidpx are not same size
+
+        # heap = [[] for i in range(self.frame.shape[1] // div + 1)]
+        # for i, p in enumerate(mmidp):
+        #     heap[p].append(mcoords[i])
+
+        # count = 0
+        # for i, idx in enumerate(area_idxs):
+        #     for m in heap[smidp[idx]]:
+        #         ratio = limit * areas[idx]
+        #         xx1 = torch.maximum(sx1[idx], m[0])
+        #         yy1 = torch.maximum(sy1[idx], m[1])
+        #         xx2 = torch.minimum(sx2[idx], m[2])
+        #         yy2 = torch.minimum(sy2[idx], m[3])
+        #         w = torch.clamp(xx2 - xx1, min=0)
+        #         h = torch.clamp(yy2 - yy1, min=0)
+        #         diff = areas[idx] - w * h
+        #         iarea_mask[i] = False if diff < ratio else True
+        #         count += 1
+        #         if not iarea_mask[i]: break
+        
+        # delete if fills criteria
+        return idxs
 
     def divide_island_boxes(self, blobs, dims, image_shape, lower_bound=800) -> list:
         """
@@ -421,7 +511,7 @@ class DepthSlicer:
             h = dim[3] - dim[2]
 
             # if both are less then just add it in 
-            if w < xlower and h < lower_bound:
+            if w < xlower and h < ylower:
                 processed_dims.append(dim)
                 continue
     
@@ -467,7 +557,7 @@ class DepthSlicer:
                     dim_h = new_dim[3] - new_dim[2]
 
                     # check if both are good, then add half of overlap 
-                    if horiz_segments > 1 or dim_w < self.slice_side_length:
+                    if horiz_segments > 1 or dim_w < xlower:
                         # Change overlap to match side length instead
                         if dim_w < self.slice_side_length: woverlap = .5 * (self.slice_side_length - dim_w)
 
@@ -482,7 +572,7 @@ class DepthSlicer:
                             new_dim[0] = new_dim[0] - 2 * woverlap
                     
 
-                    if vert_segments > 1 or dim_h < self.slice_side_length:
+                    if vert_segments > 1 or dim_h < ylower:
                         if dim_h < self.slice_side_length: hoverlap = .5 * (self.slice_side_length - dim_h)
 
                         if new_dim[2] - hoverlap > 0 and new_dim[3] + hoverlap < image_shape[0] - 1:
