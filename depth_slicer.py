@@ -303,21 +303,14 @@ class DepthSlicer:
         coords = []
         scores = []
         labels = []
-        
-        limit = len(results.xyxyn) - 1
+
+        # Convert normal coords to (l, t, r, b)
         for i, result in enumerate(results.xyxyn):
             # get labels, cords, scores
             label = result[:, -1]
             coord_thres = result[:, :4]
             score = result[:, 4:-1].view(-1)
             
-            # if i < limit:
-            #     lower_mask = coord_thres[:, 3] < .99
-            #     label = label[lower_mask]
-            #     coord_thres = coord_thres[lower_mask]
-            #     score = score[lower_mask]
-
-            # multiply coordinates to original pixel space (l, t, r, b)
             coord_thres[:, 0] = coord_thres[:, 0] * self.tlhw_dims[i, 3] + self.tlhw_dims[i, 1]
             coord_thres[:, 2] = coord_thres[:, 2] * self.tlhw_dims[i, 3] + self.tlhw_dims[i, 1]
             coord_thres[:, 1] = coord_thres[:, 1] * self.tlhw_dims[i, 2] + self.tlhw_dims[i, 0]
@@ -327,166 +320,59 @@ class DepthSlicer:
             coords.append(coord_thres)
             scores.append(score)
 
-        #score_mask = all_scores > .2
-        # prev = time.time()
-        # for i in range(len(coords)):
-        #     nms_mask = torchvision.ops.boxes.batched_nms(coords[i], scores[i], labels[i], iou_threshold=.4)
-        #     coords[i] = coords[i][nms_mask]
-        #     scores[i] = scores[i][nms_mask]
-        #     labels[i] = labels[i][nms_mask]
-        # print(f'nms took: {time.time() - prev}')
-        
-        # intersect suppress from slice -> main image
-       
+        # Remove smaller slice detections that are inside of big image detections
         bboxes = torch.cat(coords[0:-1])
         final_scores = torch.cat(scores[0:-1])
         final_labels = torch.cat(labels[0:-1])
-        is_mask = self.intersect_suppression_dummy(bboxes, coords[-1])
+        is_mask = self.mos(bboxes, coords[-1])
         bboxes = bboxes[is_mask]
         final_scores = final_scores[is_mask]
         final_labels = final_labels[is_mask]
 
+        # concat all detections
         bboxes = torch.cat([bboxes, coords[-1]])
         scores = torch.cat([final_scores, scores[-1]]).view(-1)
         labels = torch.cat([final_labels, labels[-1]])
 
+        # nms to finish it up
         nms_mask = torchvision.ops.boxes.batched_nms(bboxes, scores, labels, iou_threshold=.5)
         bboxes = bboxes[nms_mask]
         scores = scores[nms_mask]
         labels = labels[nms_mask]
 
-        # return bboxes[nms_mask].cpu().numpy(), scores[nms_mask].cpu().numpy(), labels[nms_mask].cpu().numpy()
         return bboxes.cpu().numpy(), scores.cpu().numpy(), labels.cpu().numpy()
     
-    def intersect_suppression_dummy(self, coords, mcoords):
-        is_mask = coords[:, 0] > -1
-        halfx = torch.div(coords[:, 2] - coords[:, 0], 2)
-        halfy = torch.div(coords[:, 3] - coords[:, 1], 2)
-        midpx = halfx + coords[:, 0]
-        midpy = halfy + coords[:, 1]
-        for i, coord in enumerate(coords):
+    def mos(self, scoords, mcoords):
+        """
+        midpoint overlap suppression
+        
+        Removes bounding boxes almost fully enclosed inside larger bounding boxes. Important for the borders of the 
+        slices. 
+
+        Returns tensor mask of booleans
+
+        ...
+
+        Parameters: 
+        -----------
+        scoords : tensor
+            bounding box coordinates (l, t, r, b) from a slice (in original frame scale)
+        mcoords : tensor
+            bounding box coordinates from whole image detection
+        """   
+        is_mask = scoords[:, 0] > -1
+        halfx = torch.div(scoords[:, 2] - scoords[:, 0], 2)
+        halfy = torch.div(scoords[:, 3] - scoords[:, 1], 2)
+        midpx = halfx + scoords[:, 0]
+        midpy = halfy + scoords[:, 1]
+        for i, coord in enumerate(scoords):
             is_mask[i] = (~torch.any((midpx[i] > mcoords[:, 0]) & (midpy[i] > mcoords[:, 1]) & (midpx[i] < mcoords[:, 2]) & (midpy[i] < mcoords[:, 3])))
 
         return is_mask
-    
-    def intersect_suppression(self, scoords, mcoords, limit=.5) -> torch.Tensor: 
-        """
-        Removes bounding boxes almost fully enclosed inside larger bounding boxes. Important for the borders of the 
-        slices. 
-
-        Returns tensor of indexes to mask scoords
-
-        ...
-
-        Parameters: 
-        -----------
-        scoords : tensor
-            bounding box coordinates (l, t, r, b) from a slice (in original frame scale)
-        mcoords : tensor
-            bounding box coordinates from entire frame
-        limit : float
-            hyperparameter for how much of box must be encapsulated
-        """   
-        sx1 = scoords[:, 0]
-        sy1 = scoords[:, 1]
-        sx2 = scoords[:, 2]
-        sy2 = scoords[:, 3]
-
-        mx1 = mcoords[:, 0]
-        my1 = mcoords[:, 1]
-        mx2 = mcoords[:, 2]
-        my2 = mcoords[:, 3]
-
-        areas = torch.mul(sx2 - sx1, sy2 - sy1)
-        area_idxs = torch.argsort(areas, dim=0, descending=False)
-        iarea_mask = area_idxs > 0
-
-        for i, idx in enumerate(area_idxs):
-            ratio = limit * areas[idx]
-            xx1 = torch.maximum(sx1[idx], mx1)
-            yy1 = torch.maximum(sy1[idx], my1)
-            xx2 = torch.minimum(sx2[idx], mx2)
-            yy2 = torch.minimum(sy2[idx], my2)
-            iarea = torch.mul(xx2 - xx1, yy2 - yy1)
-            iarea_mask[i] = not torch.any(torch.abs(iarea - areas[idx]) < ratio)
-
-        return area_idxs[iarea_mask]
-    
-    def intersect_suppression_heap(self, scoords, mcoords, limit=.5, div=500) -> torch.Tensor: 
-        """
-        Removes bounding boxes almost fully enclosed inside larger bounding boxes. Important for the borders of the 
-        slices. 
-
-        Returns tensor of indexes to mask scoords
-
-        ...
-
-        Parameters: 
-        -----------
-        scoords : tensor
-            bounding box coordinates (l, t, r, b) from a slice (in original frame scale)
-        mcoords : tensor
-            bounding box coordinates from entire frame
-        limit : float
-            hyperparameter for how much of box must be encapsulated
-        """   
-        sx1 = scoords[:, 0]
-        sy1 = scoords[:, 1]
-        sx2 = scoords[:, 2]
-        sy2 = scoords[:, 3]
-
-        mx1 = mcoords[:, 0]
-        my1 = mcoords[:, 1]
-        mx2 = mcoords[:, 2]
-        my2 = mcoords[:, 3]
-
-        idxs = torch.argsort(sy2, dim=0)
-
-        areas = torch.mul(sx2 - sx1, sy2 - sy1)
-        area_idxs = torch.argsort(areas, dim=0, descending=False)
-        iarea_mask = area_idxs > 0
-
-        prev = time.time()
-        mdist = torch.min(torch.abs(mx1[0] - sx1[:] + my1[0] - sy1[0]))
-        print(f'dist took {time.time() - prev}')
-
-        denom = 1 / div
-
-        # # mmidp = torch.div((mcoords[:, 2] - mcoords[:, 0]) * .5 + mcoords[:, 0], div, rounding_mode='floor')
-        # # smidp = torch.div((scoords[:, 2] - scoords[:, 0]) * .5 + scoords[:, 0], div, rounding_mode='floor')
-
-        # mmidp = torch.round(((mcoords[:, 2] - mcoords[:, 0]) * .5 + mcoords[:, 0]) * denom)
-        # smidp = torch.round(((sx2 - sx1) * .5 + sx1) * denom)
-        # mmidp = mmidp.to(torch.uint8)
-        # smidp = smidp.to(torch.uint8)
-
-        # left off cause smidpx and mmidpx are not same size
-
-        # heap = [[] for i in range(self.frame.shape[1] // div + 1)]
-        # for i, p in enumerate(mmidp):
-        #     heap[p].append(mcoords[i])
-
-        # count = 0
-        # for i, idx in enumerate(area_idxs):
-        #     for m in heap[smidp[idx]]:
-        #         ratio = limit * areas[idx]
-        #         xx1 = torch.maximum(sx1[idx], m[0])
-        #         yy1 = torch.maximum(sy1[idx], m[1])
-        #         xx2 = torch.minimum(sx2[idx], m[2])
-        #         yy2 = torch.minimum(sy2[idx], m[3])
-        #         w = torch.clamp(xx2 - xx1, min=0)
-        #         h = torch.clamp(yy2 - yy1, min=0)
-        #         diff = areas[idx] - w * h
-        #         iarea_mask[i] = False if diff < ratio else True
-        #         count += 1
-        #         if not iarea_mask[i]: break
-        
-        # delete if fills criteria
-        return idxs
 
     def divide_island_boxes(self, blobs, dims, image_shape, lower_bound=800) -> list:
         """
-        Divides larger bounding boxes into smaller divisions, depending on lower_bound. 
+        Divides larger bounding boxes into smaller divisions, depending on lower_bound (slice_side_length). 
 
         ... 
 

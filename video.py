@@ -52,7 +52,7 @@ def parse_args():
                     help='path to video, or directory of videos [TBI]')
     parser.add_argument('--prop_thresh', type=float, help='proportion threshold, value between 0.0 and 1.0', default=0.9)
     parser.add_argument('--depth_thresh', type=float, help='depth threshold, between 0.0 and 1.0. 1.0 is closest.', default=0.2)
-    parser.add_argument('--method', type=str, help='Method of image processing', choices=['precise_grid', 'precise', 'mask'], default='precise')
+    parser.add_argument('--method', type=str, help='Method of image processing', choices=['precise_grid', 'precise', 'mask'], default='mask')
     parser.add_argument('--slice_side_length', type=int, help='length of slice sides', default=800)
     parser.add_argument('--square_size', type=int, help='side length of squares image is split up into in calibration.', default=50)
     parser.add_argument('--grid_width', type=int, help='how many columns in precise grid slices', default=3)

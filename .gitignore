@@ -6,6 +6,6 @@ stats/*
 *.mp4 
 *.avi
 __pycache__/*
-*.txt
+dims.txt
 *.ipynb
 .vs/*
